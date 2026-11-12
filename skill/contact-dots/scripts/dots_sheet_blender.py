@@ -40,6 +40,8 @@ PROP = [(0.5, 0.64, 0.86, 1), (0.66, 0.6, 0.5, 1), (0.6, 0.78, 0.7, 1), (0.78, 0
 AXES = [(1, 0.15, 0.15, 1), (0.2, 1, 0.2, 1), (0.25, 0.5, 1, 1)]   # X Y Z: the only near-pure R/G/B on the sheet
 MARK_DEPTH = 0.6        # marks drawn in front sit this far before the camera (ortho: same spot on screen)
 TRIAD_MM, TRIAD_PX = 30, 40
+TRIAD_ZOOM = 1.6        # a tile may widen this much to show whole triads
+DISC_ALPHA = 0.65        # disc fill: strong enough to read on its own, the surface still shows through
 UP = Vector((0, 0, 1))
 
 
@@ -336,8 +338,8 @@ def arrow_bases(tile):
     return p, q + side.normalized() * 0.5 * L
 
 
-def frame_tile(cam, text, back, tile):
-    """Fit p, q and the arrow tips inside the tile above the caption strip. Returns the ortho scale."""
+def frame_tile(cam, text, back, tile, extra=()):
+    """Fit p, q, the arrow tips and `extra` (triad tips) inside the tile above the caption strip. Returns the ortho scale."""
     look = view_of(tile)
     rot = look.to_track_quat('-Z', 'Y')
     right, up = rot @ Vector((1, 0, 0)), rot @ Vector((0, 1, 0))
@@ -347,6 +349,7 @@ def frame_tile(cam, text, back, tile):
         L = arrow_length(tile)
         pa, pb = arrow_bases(tile)
         pts += [pb, pa + Vector(tile['da']).normalized() * L, pb + Vector(tile['db']).normalized() * L]
+    pts += list(extra)
     xs = [v.dot(right) for v in pts]; ys = [v.dot(up) for v in pts]
     w, h = max(xs) - min(xs), max(ys) - min(ys)
     lines = wrap(tile['caption'])
@@ -430,8 +433,25 @@ def main(job_path):
             tile['n'] = list(n)
         scale = frame_tile(cam, text, back, tile)
         bpy.context.view_layer.update()                       # the camera just moved: on_screen() reads its matrix
+        look = view_of(tile)
+        arm_len = max(TRIAD_MM / 1000.0, TRIAD_PX / TILE * scale)
+        triads = []
+        if arm_len <= 3 * TRIAD_MM / 1000.0:
+            for ch in chars:
+                for _name, origin, x, y, z in frames_of(ch):
+                    near_p = (origin - p) - look * look.dot(origin - p)
+                    if near_p.length > 0.6 * arm_len and on_screen(cam, scale, origin, back.scale[1]):  # not on the contact
+                        triads.append((origin, (x, y, z)))
+        if triads:                                            # widen the view so whole triads clear the caption and edges
+            tips = [o for o, _ in triads] + [o + d * arm_len * 1.15 for o, axes in triads for d in axes]
+            wide = frame_tile(cam, text, back, tile, tips)
+            if wide > TRIAD_ZOOM * scale:                     # too far out for the contact: keep the close view
+                frame_tile(cam, text, back, tile)
+            else:
+                scale = wide
+            bpy.context.view_layer.update()
         r = scale * 0.016
-        look = view_of(tile); base = look.dot((p + q) / 2 - cam.location)
+        base = look.dot((p + q) / 2 - cam.location)
 
         def lift(depth):                                      # moves a mark to `depth` metres before the camera
             return -look * (base - depth)
@@ -444,16 +464,14 @@ def main(job_path):
         if hit:                             # the disc stays on the real surface (depth-tested); edge and normal in front
             obj = hit[0]; n = Vector(tile['n']); key = obj.name if obj else 'floor'
             tint = complement(colour[obj]) if obj else COLOURS['floorDisc']; edge = emission('DiscEdge_' + key, tint)
-            marks.disc(q, n, 0.0125, translucent('Disc_' + key, tint))
+            marks.disc(q, n, 0.0125, translucent('Disc_' + key, tint, DISC_ALPHA))
             marks.ring(q + lift(MARK_DEPTH + 0.3), n, 0.0125, r * 0.3, edge)
             marks.arrow(q + lift(MARK_DEPTH + 0.3), n, 0.025, r * 0.4, edge, rim)
-        arm_len = max(TRIAD_MM / 1000.0, TRIAD_PX / TILE * scale)
-        if arm_len <= 3 * TRIAD_MM / 1000.0:
-            for ch in chars:
-                for _name, origin, x, y, z in frames_of(ch):
-                    near_p = (origin - p) - look * look.dot(origin - p)
-                    if on_screen(cam, scale, origin, back.scale[1]) and near_p.length > 0.6 * arm_len:   # not on the contact
-                        marks.triad(origin, (x, y, z), arm_len, r * 0.45, lift(MARK_DEPTH + 0.15), rim)
+        for origin, (x, y, z) in triads:
+            for k in (1.0, 0.8, 0.6):                         # shorter arms until the whole triad (cone tips too)
+                if all(on_screen(cam, scale, origin + d * arm_len * k * 1.15, back.scale[1]) for d in (x, y, z)):
+                    marks.triad(origin, (x, y, z), arm_len * k, r * 0.45, lift(MARK_DEPTH + 0.15), rim)
+                    break                                     # (none fits: no triad rather than one under the caption)
         p, q = p + lift(MARK_DEPTH), q + lift(MARK_DEPTH)
         if arrows:
             length = arrow_length(tile)
