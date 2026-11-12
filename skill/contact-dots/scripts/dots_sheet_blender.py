@@ -282,6 +282,8 @@ def main(job_path):
         if arrows:
             length = arrow_length(tile)
             pa, pb = arrow_bases(tile)
+            lift = -view_of(tile) * 0.15          # toward the camera: drawn in front of the body; ortho, so same screen spot
+            pa, pb, q = pa + lift, pb + lift, q + lift
             marks.arrow(pa, Vector(tile['da']).normalized(), length, r * 0.7, emission('ArrowA', COLOURS['arrowA']))
             marks.arrow(pb, Vector(tile['db']).normalized(), length, r * 0.7, verdict)
             marks.sphere(pa, r * 1.3, emission('ArrowA', COLOURS['arrowA'])); marks.sphere(pb, r * 1.3, verdict)
