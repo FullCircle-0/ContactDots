@@ -22,7 +22,7 @@ positions (`floorZ`, `point`, `offset`, `signRangeM`) and mm for limits; angles 
 | `joints` | canonical bone names whose world positions are written per frame | none |
 | `signRangeM` | a dot is trusted to be inside a surface only within this distance | 0.03 |
 
-FBX frames: Blender's importer puts FBX time 0 on scene frame 1 (Unity, Mixamo and Cascadeur takes start at 0).
+FBX frames: Blender's importer puts FBX time 0 on scene frame 1 (Unity and Mixamo takes start at 0).
 An FBX exported from Blender with keys from frame 1 therefore lands on frames 2 onward; check the range first.
 
 Need at least one of `characters`, `props`, `dots`.
