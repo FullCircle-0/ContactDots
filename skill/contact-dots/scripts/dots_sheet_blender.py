@@ -156,6 +156,14 @@ def view_of(tile):
         n = Vector(tile['da']).cross(Vector(tile['db']))
         if n.length > 1e-3:
             return -n.normalized() if n.dot(UP) > 0 else n.normalized()
+        da = Vector(tile['da'])                       # parallel arrows: look square onto da
+        if da.length > 1e-6:
+            da.normalize()
+            n = da.cross(UP)
+            if n.length < 1e-3:
+                n = da.orthogonal()
+            n.normalize()
+            return -n if n.dot(UP) > 0 else n
     gap = q - p
     side = gap.cross(UP) if gap.length > 1e-4 else Vector((0, 0, 0))
     if side.length < 1e-6:
@@ -165,7 +173,23 @@ def view_of(tile):
 
 
 def arrow_length(tile):
-    return max(0.05, (Vector(tile['p']) - Vector(tile['q'])).length * 0.8)
+    return max(0.06, (Vector(tile['p']) - Vector(tile['q'])).length * 0.8)
+
+
+def arrow_bases(tile):
+    """Where the two arrows start. Parallel arrows from (nearly) the same point would hide each other,
+    so the second one moves aside, across the view, by half an arrow length."""
+    p, q = Vector(tile['p']), Vector(tile['q'])
+    L = arrow_length(tile)
+    look = view_of(tile)
+    gap = (q - p) - look * look.dot(q - p)                     # p->q as seen on screen
+    if gap.length >= 0.35 * L:
+        return p, q
+    db = Vector(tile['db']).normalized()
+    side = look.cross(db)
+    if side.length < 1e-6:
+        side = look.orthogonal()
+    return p, q + side.normalized() * 0.5 * L
 
 
 def frame_tile(cam, text, back, tile):
@@ -177,7 +201,8 @@ def frame_tile(cam, text, back, tile):
     pts = [p, q]
     if 'da' in tile and 'db' in tile:
         L = arrow_length(tile)
-        pts += [p + Vector(tile['da']).normalized() * L, q + Vector(tile['db']).normalized() * L]
+        pa, pb = arrow_bases(tile)
+        pts += [pb, pa + Vector(tile['da']).normalized() * L, pb + Vector(tile['db']).normalized() * L]
     xs = [v.dot(right) for v in pts]; ys = [v.dot(up) for v in pts]
     w, h = max(xs) - min(xs), max(ys) - min(ys)
     lines = wrap(tile['caption'])
@@ -256,9 +281,12 @@ def main(job_path):
         p, q = Vector(tile['p']), Vector(tile['q'])
         if arrows:
             length = arrow_length(tile)
-            marks.arrow(p, Vector(tile['da']).normalized(), length, r * 0.7, emission('ArrowA', COLOURS['arrowA']))
-            marks.arrow(q, Vector(tile['db']).normalized(), length, r * 0.7, verdict)
-            marks.sphere(p, r * 1.3, emission('ArrowA', COLOURS['arrowA'])); marks.sphere(q, r * 1.3, verdict)
+            pa, pb = arrow_bases(tile)
+            marks.arrow(pa, Vector(tile['da']).normalized(), length, r * 0.7, emission('ArrowA', COLOURS['arrowA']))
+            marks.arrow(pb, Vector(tile['db']).normalized(), length, r * 0.7, verdict)
+            marks.sphere(pa, r * 1.3, emission('ArrowA', COLOURS['arrowA'])); marks.sphere(pb, r * 1.3, verdict)
+            if (pb - q).length > 1e-6:
+                marks.rod(q, pb, r * 0.25, verdict)                # thin tie back to the measured point
         else:
             marks.sphere(p, r * 1.7, verdict); marks.sphere(q, r * 1.1, emission('Surface', COLOURS['surface']))
             marks.rod(p, q, r * 0.45, verdict)
