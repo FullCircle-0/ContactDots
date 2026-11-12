@@ -6,7 +6,7 @@ rebuilt from its files, or from its 'builtin' selftest entry), dotsAt (frame -> 
 order for the dot colours) and tiles [{name, frame, p, q, ok, caption, da, db}] (metres, unit directions).
 
 Per tile: the bodies see-through, every dot of that frame coloured per character (custom dots on objects in one
-colour), the measured dot and its surface point larger, the pair line (yellow pass, magenta fail), for align and range
+colour), the measured dot and its surface point larger, the pair line (yellow pass, magenta fail; a ring round a pair too close for a line), for align and range
 the two directions as arrows; an orthographic close-up looks across the pair (or square onto the two arrows) with the
 caption at the bottom. Tiles go to dots-sheet-tiles/<name>.png and are composed into the sheet. Reads only; writes
 only beside the sheet. Prints DOTS_SHEET_DONE <json>.
@@ -32,7 +32,7 @@ ROLE_COLOURS = [(1.0, 0.33, 0.1, 1), (0.1, 0.8, 0.75, 1), (0.6, 0.9, 0.3, 1), (0
 COLOURS = {'pass': (1, 1, 0, 1), 'fail': (1, 0, 1, 1), 'object': (0.65, 0.35, 0.95, 1), 'surface': (0.95, 0.95, 0.95, 1),
            'arrowA': (0.45, 0.65, 1.0, 1), 'text': (1, 1, 1, 1)}      # never pure R/G/B
 # Palette values are display (sRGB) colours; emission() converts them to linear so the Standard view shows them as written.
-SKIN = [(0.6, 0.62, 0.66, 1), (0.8, 0.78, 0.75, 1)]
+SKIN = [(0.92, 0.66, 0.48, 1), (0.48, 0.58, 0.8, 1)]   # warm body / cool prop, apart from the background
 UP = Vector((0, 0, 1))
 
 
@@ -52,7 +52,7 @@ def emission(name, rgba, strength=1.0):
     return m
 
 
-def see_through(name, rgba, alpha=0.3):
+def see_through(name, rgba, alpha=0.5):
     m = bpy.data.materials.new(name); m.use_nodes = True
     bsdf = m.node_tree.nodes['Principled BSDF']
     bsdf.inputs['Base Color'].default_value = rgba; bsdf.inputs['Alpha'].default_value = alpha
@@ -108,6 +108,13 @@ class Marks:
                                                                radius2=r if r2 is None else r2, depth=v.length), mat)
         o.location = p + v / 2; o.rotation_euler = v.to_track_quat('Z', 'Y').to_euler()
 
+    def ring(self, c, normal, radius, r, mat, n=28):
+        """A ring facing the camera: marks a pair whose gap is too short to show a line."""
+        a = normal.orthogonal().normalized(); b = normal.cross(a).normalized()
+        pts = [c + (a * math.cos(2 * math.pi * i / n) + b * math.sin(2 * math.pi * i / n)) * radius for i in range(n + 1)]
+        for u, v in zip(pts, pts[1:]):
+            self.rod(u, v, r, mat, name='ring')
+
     def arrow(self, p, d, length, r, mat):
         tip = p + d * length; neck = p + d * (length * 0.78)
         self.rod(p, neck, r, mat, name='arrow'); self.rod(neck, tip, r * 3.2, mat, r2=0.0, name='head')
@@ -126,8 +133,8 @@ def camera(scene):
     return cam, text, back
 
 
-CAPTION = 0.03          # caption letter height, fraction of the tile
-WRAP = 56               # caption characters per line
+CAPTION = 0.042         # caption letter height, fraction of the tile
+WRAP = 40               # caption characters per line
 MARGIN = 1.35           # framed marks span at most 1/MARGIN of the free area
 
 
@@ -175,7 +182,7 @@ def frame_tile(cam, text, back, tile):
     w, h = max(xs) - min(xs), max(ys) - min(ys)
     lines = wrap(tile['caption'])
     strip = CAPTION * (1.25 * len(lines) + 0.7)                               # fraction of the tile
-    least = 0.3 if 'da' in tile else 0.12
+    least = 0.15 if 'da' in tile else 0.12
     scale = max(least, w * MARGIN, h * MARGIN / (1 - strip))
     cx, cy = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
     centre = right * cx + up * (cy - scale * strip / 2) + look * look.dot((p + q) / 2)
@@ -217,7 +224,7 @@ def main(job_path):
     build_scene(cfg)
     scene = bpy.context.scene
     world = bpy.data.worlds.new('World'); scene.world = world; world.use_nodes = True
-    world.node_tree.nodes['Background'].inputs['Color'].default_value = (0.16, 0.17, 0.2, 1)
+    world.node_tree.nodes['Background'].inputs['Color'].default_value = (0.035, 0.038, 0.05, 1)
     bpy.ops.object.light_add(type='SUN', rotation=(math.radians(50), 0, math.radians(30))); bpy.context.object.data.energy = 3.0
     for engine in ('BLENDER_EEVEE', 'BLENDER_EEVEE_NEXT'):
         try:
@@ -239,21 +246,24 @@ def main(job_path):
         marks.clear()
         scene.frame_set(int(tile['frame']))
         scale = frame_tile(cam, text, back, tile)
-        r = scale * 0.012
+        r = scale * 0.016
+        arrows = 'da' in tile and 'db' in tile
         for name, pos in (job.get('dotsAt', {}).get(str(tile['frame'])) or {}).items():
             role = name.split('.')[0]
             rgba = ROLE_COLOURS[roles[role] % len(ROLE_COLOURS)] if role in roles else COLOURS['object']
-            marks.sphere(Vector(pos), r * 0.7, emission('Dot_%s' % (role if role in roles else 'object'), rgba))
+            marks.sphere(Vector(pos), r * (0.3 if arrows else 0.5), emission('Dot_%s' % (role if role in roles else 'object'), rgba))
         verdict = emission('Verdict_' + ('pass' if tile['ok'] else 'fail'), COLOURS['pass' if tile['ok'] else 'fail'])
         p, q = Vector(tile['p']), Vector(tile['q'])
-        if 'da' in tile and 'db' in tile:
+        if arrows:
             length = arrow_length(tile)
-            marks.arrow(p, Vector(tile['da']).normalized(), length, r * 0.35, emission('ArrowA', COLOURS['arrowA']))
-            marks.arrow(q, Vector(tile['db']).normalized(), length, r * 0.35, verdict)
+            marks.arrow(p, Vector(tile['da']).normalized(), length, r * 0.7, emission('ArrowA', COLOURS['arrowA']))
+            marks.arrow(q, Vector(tile['db']).normalized(), length, r * 0.7, verdict)
             marks.sphere(p, r * 1.3, emission('ArrowA', COLOURS['arrowA'])); marks.sphere(q, r * 1.3, verdict)
         else:
             marks.sphere(p, r * 1.7, verdict); marks.sphere(q, r * 1.1, emission('Surface', COLOURS['surface']))
             marks.rod(p, q, r * 0.45, verdict)
+            if (p - q).length < r * 4:
+                marks.ring((p + q) / 2, view_of(tile), r * 4, r * 0.35, verdict)
         path = tiles_dir / ('%s.png' % tile['name'])
         scene.render.filepath = str(path)
         bpy.ops.render.render(write_still=True)
