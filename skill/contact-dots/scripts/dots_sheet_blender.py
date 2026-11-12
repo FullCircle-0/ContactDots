@@ -28,21 +28,26 @@ import dots_blender  # noqa: E402
 TILE = 480
 COLS = 3
 GAP_PX = 6
-ROLE_COLOURS = [(1.0, 0.4, 0.05, 1), (0.1, 0.8, 0.75, 1), (0.6, 0.9, 0.3, 1), (0.9, 0.5, 0.6, 1)]   # far from yellow
+ROLE_COLOURS = [(1.0, 0.33, 0.1, 1), (0.1, 0.8, 0.75, 1), (0.6, 0.9, 0.3, 1), (0.9, 0.5, 0.6, 1)]   # far from yellow
 COLOURS = {'pass': (1, 1, 0, 1), 'fail': (1, 0, 1, 1), 'object': (0.65, 0.35, 0.95, 1), 'surface': (0.95, 0.95, 0.95, 1),
            'arrowA': (0.45, 0.65, 1.0, 1), 'text': (1, 1, 1, 1)}      # never pure R/G/B
+# Palette values are display (sRGB) colours; emission() converts them to linear so the Standard view shows them as written.
 SKIN = [(0.6, 0.62, 0.66, 1), (0.8, 0.78, 0.75, 1)]
 UP = Vector((0, 0, 1))
 
 
-def emission(name, rgba, strength=2.0):
+def to_linear(c):
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def emission(name, rgba, strength=1.0):
     m = bpy.data.materials.get(name)
     if m:
         return m
     m = bpy.data.materials.new(name); m.use_nodes = True; nt = m.node_tree
     for n in list(nt.nodes):
         nt.nodes.remove(n)
-    e = nt.nodes.new('ShaderNodeEmission'); e.inputs[0].default_value = rgba; e.inputs[1].default_value = strength
+    e = nt.nodes.new('ShaderNodeEmission'); e.inputs[0].default_value = [to_linear(c) for c in rgba[:3]] + [rgba[3]]; e.inputs[1].default_value = strength
     o = nt.nodes.new('ShaderNodeOutputMaterial'); nt.links.new(e.outputs[0], o.inputs[0])
     return m
 
@@ -238,7 +243,7 @@ def main(job_path):
         for name, pos in (job.get('dotsAt', {}).get(str(tile['frame'])) or {}).items():
             role = name.split('.')[0]
             rgba = ROLE_COLOURS[roles[role] % len(ROLE_COLOURS)] if role in roles else COLOURS['object']
-            marks.sphere(Vector(pos), r * 0.7, emission('Dot_%s' % (role if role in roles else 'object'), rgba, 1.0))   # strength 2 clips orange to yellow
+            marks.sphere(Vector(pos), r * 0.7, emission('Dot_%s' % (role if role in roles else 'object'), rgba))
         verdict = emission('Verdict_' + ('pass' if tile['ok'] else 'fail'), COLOURS['pass' if tile['ok'] else 'fail'])
         p, q = Vector(tile['p']), Vector(tile['q'])
         if 'da' in tile and 'db' in tile:
