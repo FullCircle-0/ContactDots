@@ -54,7 +54,7 @@ def norm(name):
 
 
 def _prefix(rig_names):
-    """A common prefix in front of 'Hips' (e.g. 'Raven_', 'mixamorig1:', 'CC_Base_'), normalised."""
+    """A common prefix in front of 'Hips' (e.g. 'Hero_', 'mixamorig1:', 'CC_Base_'), normalised."""
     for n in rig_names:
         k = norm(n)
         if k.endswith('hips'):
