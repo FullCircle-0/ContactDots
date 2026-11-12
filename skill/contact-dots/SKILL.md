@@ -73,6 +73,8 @@ Structural and rotational checks use custom dots (on a bone, an object, or a mes
 directions (bone or object axis, a line between dots, a surface normal, a palm normal, a world
 axis). Full config: `references/config.md`. One worked example per check kind:
 `references/checks.md`.
+A whole scene with every check kind (a mannequin hand grips and lifts a bar): `examples/grab/`
+in the ContactDots repo (`config.json`; the expected result is PASS 10/10, 0 penetrations).
 
 Limits: preset `finger` (default: a contact may be at most 3 mm off at its frames and at
 most 2 mm inside on any frame) or `limb` (10 mm / 10 mm), or your own numbers.
