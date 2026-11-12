@@ -47,8 +47,8 @@ FINGERS = {  # name: (y offset, lengths of 1, 2, 3, end, radius)
     'Ring': (0.0105, (0.045, 0.028, 0.022, 0.012), 0.0090),
     'Pinky': (0.0305, (0.035, 0.022, 0.019, 0.010), 0.0080),
 }
-THUMB_BASE = (-0.755, -0.035, 1.42)
-THUMB_DIR = Vector((-0.5, -0.85, -0.15)).normalized()
+THUMB_BASE = (-0.755, -0.035, 1.415)   # wrist side of the grip line, index edge of the palm
+THUMB_DIR = Vector((-0.1, -0.35, -0.93)).normalized()   # out of the palm (down), a little to the index side
 THUMB_LEN, THUMB_R = (0.040, 0.035, 0.030, 0.012), 0.0105
 LEG = [
     ('UpLeg', (-0.09, 0, 0.98), (-0.09, 0, 0.53), 'Hips', 0.070),
@@ -180,16 +180,28 @@ def build_body(arm, specs):
         body.vertex_groups.new(name=g)
     body.parent = arm
     body.modifiers.new('Armature', 'ARMATURE').object = arm
-    mat = bpy.data.materials.new('Mannequin_Grey'); mat.diffuse_color = (0.55, 0.55, 0.55, 1)
+    mat = coloured_material('Mannequin_Grey', (0.55, 0.55, 0.55, 1))
     mesh.materials.append(mat)
     return body
+
+
+def coloured_material(name, colour):
+    """A material that shows its colour in the viewport and in renders."""
+    mat = bpy.data.materials.new(name); mat.diffuse_color = colour
+    nt = getattr(mat, 'node_tree', None)
+    if nt is None and hasattr(mat, 'use_nodes'):
+        mat.use_nodes = True; nt = mat.node_tree
+    bsdf = nt.nodes.get('Principled BSDF') if nt else None
+    if bsdf:
+        bsdf.inputs['Base Color'].default_value = colour
+    return mat
 
 
 def mesh_object(name, build, colour):
     bm = bmesh.new(); build(bm)
     mesh = bpy.data.meshes.new(name); bm.to_mesh(mesh); bm.free()
     ob = bpy.data.objects.new(name, mesh); bpy.context.scene.collection.objects.link(ob)
-    mat = bpy.data.materials.new(name + '_mat'); mat.diffuse_color = colour
+    mat = coloured_material(name + '_mat', colour)
     mesh.materials.append(mat)
     return ob
 
@@ -242,6 +254,10 @@ def seg_line_dist(a, b, c, u):
         d = (w - u * w.dot(u)).length
         best = d if best is None or d < best else best
     return best
+
+
+def _seg_seg(a, b, c, d):
+    return min(((a + (b - a) * (i / 50.0)) - (c + (d - c) * (j / 50.0))).length for i in range(51) for j in range(51))
 
 
 def chain_gap(arm, bones, radius, c, u):
@@ -325,16 +341,32 @@ def main():
     curls = {}
     for f, (_dy, _lens, r) in list(FINGERS.items()) + [('Thumb', (0, THUMB_LEN, THUMB_R))]:
         bones = [side_name(-1, 'Hand%s%d' % (f, i)) for i in (1, 2, 3)]
-        axis, toward = Vector((1, 0, 0)), -hz         # curl toward the palm about the bone's x
-        sgn = curl_sign(arm, bones[0], axis, toward)
-        angles = []
+        angles, axes, sgns = [], [], []
         for k in range(3):
+            if f == 'Thumb':   # the thumb wraps the bar from the wrist side: turn about the bar axis toward the knuckles
+                pb = arm.pose.bones[bones[k]]
+                pb.rotation_quaternion = Quaternion(); bpy.context.view_layer.update()
+                axis = (pb.matrix.to_3x3().transposed() @ hx).normalized()
+                toward = hand.col[1].xyz.normalized()
+            else:
+                axis, toward = Vector((1, 0, 0)), -hz     # curl toward the palm about the bone's x
+            if f == 'Thumb' or k == 0:   # a finger keeps its first joint's sense (later joints point back under the bar)
+                sgn = curl_sign(arm, bones[k], axis, toward)
             angles.append(solve_joint(arm, bones, k, axis, sgn, r, c, hx))
-            if f == 'Thumb':
-                break
-        curls[f] = (bones, axis, sgn, angles)
+            axes.append(axis); sgns.append(sgn)
+        curls[f] = (bones, axes, sgns, angles)
         gap = chain_gap(arm, bones, r, c, hx)
-        print('DOTS_GRAB finger %s curls %s gap %.2f mm' % (f, ['%.1f' % a for a in angles], gap * 1000))
+        tip = arm.pose.bones[bones[2]].tail - c
+        tip -= hx * tip.dot(hx)
+        wrap = math.degrees(math.atan2(tip.dot(hand.col[1].xyz.normalized()), tip.dot(hz)))
+        print('DOTS_GRAB finger %s curls %s gap %.2f mm tip at %.0f deg round the bar (palm 0, knuckles +90, wrist -90)'
+              % (f, ['%.1f' % a for a in angles], gap * 1000, wrap))
+
+    thumb = curls['Thumb'][0]
+    for f in FINGERS:
+        clear = min(min(_seg_seg(arm.pose.bones[t].head, arm.pose.bones[t].tail, arm.pose.bones[b].head,
+                                 arm.pose.bones[b].tail) for t in thumb) for b in curls[f][0])
+        print('DOTS_GRAB thumb to %s clearance %.1f mm' % (f, (clear - THUMB_R - FINGERS[f][2]) * 1000))
 
     # left arm hangs at the side for the whole take
     for n in ('Arm', 'ForeArm', 'Hand'):
@@ -348,8 +380,8 @@ def main():
         for n in ('Arm', 'ForeArm', 'Hand'):
             arm.pose.bones[side_name(-1, n)].keyframe_insert('rotation_quaternion', frame=fr)
         t = 0.0 if fr <= REACH_END else smooth((fr - REACH_END) / (GRIP_END - REACH_END))
-        for f, (bones, axis, sgn, angles) in curls.items():
-            for b, a in zip(bones, angles + [0.0] * (3 - len(angles))):
+        for f, (bones, axes, sgns, angles) in curls.items():
+            for b, axis, sgn, a in zip(bones, axes, sgns, angles):
                 pb = arm.pose.bones[b]
                 pb.rotation_quaternion = Quaternion(axis, sgn * math.radians(a * t))
                 pb.keyframe_insert('rotation_quaternion', frame=fr)
