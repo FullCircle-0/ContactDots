@@ -388,6 +388,18 @@ def curl_sign(arm, bone, axis, toward):
     return s
 
 
+def action_fcurves(ob):
+    """Every F-curve of the object's action (Blender 5 layered actions, or the older flat list)."""
+    act = ob.animation_data.action if ob.animation_data else None
+    if act is None:
+        return []
+    if getattr(act, 'layers', None):
+        slot = ob.animation_data.action_slot
+        return [fc for layer in act.layers for strip in layer.strips
+                for bag in strip.channelbags if bag.slot == slot for fc in bag.fcurves]
+    return list(getattr(act, 'fcurves', []))
+
+
 def main():
     out = Path(sys.argv[sys.argv.index('--') + 1]).resolve() if '--' in sys.argv else Path(__file__).parent
     out.mkdir(parents=True, exist_ok=True)
@@ -490,6 +502,13 @@ def main():
     sc.frame_set(1)
     print('DOTS_GRAB bar centre %s table top %.3f' % (tuple(round(x, 4) for x in bar_centre), table_top))
     bpy.ops.wm.save_as_mainfile(filepath=str(out / 'grab.blend'))
+    # FBX takes from Unity, Mixamo or Cascadeur start at time 0, and Blender's importer puts time 0 on frame 1
+    # (anim_offset 1). Write the take from time 0 too, so grab.fbx imports on frames 1-40 like grab.blend.
+    for ob in (arm, bar):
+        for fc in action_fcurves(ob):
+            for kp in fc.keyframe_points:
+                kp.co.x -= 1; kp.handle_left.x -= 1; kp.handle_right.x -= 1
+    sc.frame_start, sc.frame_end = 0, FRAMES - 1
     bpy.ops.export_scene.fbx(filepath=str(out / 'grab.fbx'), object_types={'ARMATURE', 'MESH'}, add_leaf_bones=False,
                              bake_anim=True, bake_anim_use_all_actions=False, bake_anim_use_nla_strips=False,
                              bake_anim_simplify_factor=0.0, bake_anim_force_startend_keying=True)
