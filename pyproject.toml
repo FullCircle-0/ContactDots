@@ -1,0 +1,10 @@
+[project]
+name = "contact-dots-source"
+version = "0.1.0"
+description = "Source and tests of the contact-dots Claude skill"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+markers = ["blender: needs a Blender install (skipped when none is found)"]
