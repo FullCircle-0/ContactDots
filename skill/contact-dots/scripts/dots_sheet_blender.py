@@ -238,7 +238,7 @@ def main(job_path):
         for name, pos in (job.get('dotsAt', {}).get(str(tile['frame'])) or {}).items():
             role = name.split('.')[0]
             rgba = ROLE_COLOURS[roles[role] % len(ROLE_COLOURS)] if role in roles else COLOURS['object']
-            marks.sphere(Vector(pos), r * 0.7, emission('Dot_%s' % (role if role in roles else 'object'), rgba))
+            marks.sphere(Vector(pos), r * 0.7, emission('Dot_%s' % (role if role in roles else 'object'), rgba, 1.0))   # strength 2 clips orange to yellow
         verdict = emission('Verdict_' + ('pass' if tile['ok'] else 'fail'), COLOURS['pass' if tile['ok'] else 'fail'])
         p, q = Vector(tile['p']), Vector(tile['q'])
         if 'da' in tile and 'db' in tile:
