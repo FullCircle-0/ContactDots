@@ -3,9 +3,10 @@
   blender -b --factory-startup -P build_grab.py -- <out folder>
 
 Writes grab.blend and grab.fbx. No outside assets: the skeleton uses Mixamo bone names (65 bones), the body is one
-grey mesh of rounded segments rigidly skinned to it, the bar (3 cm x 40 cm) stands on a block table. Frames 1-15
-reach, 16-20 the fingers close (each joint curls until its segment touches the bar), 21-40 the hand lifts the bar
-20 cm; the bar follows the hand rigidly from frame 20.
+grey mesh of rounded segments rigidly skinned to it, the bar (3 cm x 40 cm) stands on a block table. Frames 1-10
+the open hand rises over the bar, 11-15 it slides down beside it, 16-20 the fingers close (the knuckle curls until
+the finger meets the bar, then the two outer joints put the tip on it), 21-40 the hand lifts the bar 20 cm; the bar
+follows the hand rigidly from frame 20.
 """
 import math
 import sys
@@ -20,8 +21,11 @@ FRAMES = 40
 REACH_END, GRIP_END = 15, 20
 BAR_R, BAR_LEN = 0.015, 0.40
 PALM_HALF = 0.0125              # half thickness of the palm block
-BAR_Y = 0.075                   # bar axis along the hand bone (m from the wrist)
-BAR_ABOVE = 0.06                # bar centre sits this far below the grip line (grip on the upper half)
+BAR_Y = 0.060                   # bar axis along the hand bone (m from the wrist): under the palm centre
+ABDUCT_DEG = 15.0              # hanging upper arms swing out this far, clear of the hips
+BAR_ABOVE = 0.10                # bar centre sits this far below the grip line (grip near the top)
+PRE_UP = 0.17                   # the open hand comes in this far above the grip, then slides down onto the bar
+PRE_END = 10                    # frames 1-10 lift the hand over the bar, 11-15 slide it down
 LIFT_DEG = 73.0                 # shoulder swing that lifts the hand ~20 cm
 
 # ---------------------------------------------------------------- skeleton (right side; the left mirrors x)
@@ -169,7 +173,8 @@ def build_body(arm, specs):
         centre = hand @ Vector((0, 0.047, 0))
         assign(_box(bm, centre, (0.085, 0.094, 2 * PALM_HALF), rot), side_name(s, 'Hand'))
         foot = rest[side_name(s, 'Foot')]
-        assign(_box(bm, foot @ Vector((0, 0.09, 0)), (0.09, 0.24, 0.07), foot.to_3x3()), side_name(s, 'Foot'))
+        fh = foot.translation   # flat on the floor: sole at z 0, toes forward (-y)
+        assign(_box(bm, (fh.x, -0.06, 0.04), (0.09, 0.24, 0.08), Matrix.Identity(3)), side_name(s, 'Foot'))
     mesh = bpy.data.meshes.new('Mannequin_Body')
     bm.to_mesh(mesh); bm.free()
     for p in mesh.polygons:
@@ -209,7 +214,8 @@ def mesh_object(name, build, colour):
 # ---------------------------------------------------------------- posing
 def frame_rot(y, z):
     """Armature-space rotation whose bone y and z axes are the given directions."""
-    y = Vector(y).normalized(); z = Vector(z).normalized()
+    y = Vector(y).normalized(); z = Vector(z)
+    z = (z - y * z.dot(y)).normalized()
     x = y.cross(z)
     return Matrix((x, y, z)).transposed()
 
@@ -219,18 +225,50 @@ def smooth(t):
     return t * t * (3 - 2 * t)
 
 
+SHOULDER = Vector((-0.20, 0, 1.42))
+UPPER_LEN, FORE_LEN = 0.28, 0.25
+
+
+def ik_arm(up_by, down, fwd, med, w=None, hand_rot=None, pole=None):
+    """Rotations of upper arm, forearm, hand with the wrist `up_by` m above its grip spot (or at `w`), the hand turned
+    as in the grip (or `hand_rot`), the elbow bending in the grip's arm plane."""
+    elbow0 = SHOULDER + down * UPPER_LEN
+    if w is None:
+        w = elbow0 + fwd * FORE_LEN + Vector((0, 0, up_by))
+    d = min((w - SHOULDER).length, UPPER_LEN + FORE_LEN - 1e-6)
+    u = (w - SHOULDER) / d
+    pole = pole if pole is not None else elbow0 - SHOULDER
+    v = pole - u * pole.dot(u)
+    v = v.normalized() if v.length > 1e-9 else Vector((0, -1, 0))
+    a = (UPPER_LEN ** 2 - FORE_LEN ** 2 + d * d) / (2 * d)
+    h = math.sqrt(max(0.0, UPPER_LEN ** 2 - a * a))
+    e = SHOULDER + u * a + v * h
+    w = SHOULDER + u * d
+    return [frame_rot(e - SHOULDER, med), frame_rot(w - e, med), hand_rot or frame_rot(fwd, med)]
+
+
 def arm_targets(f):
     """Armature-space rotations of RightArm, RightForeArm, RightHand at frame f."""
-    down, fwd, med = Vector((0, 0, -1)), Vector((0, -1, 0)), Vector((-1, 0, 0))
+    a = math.radians(ABDUCT_DEG)
+    down, fwd, med = Vector((-math.sin(a), 0, -math.cos(a))), Vector((0, -1, 0)), Vector((-1, 0, 0))
     rest = [frame_rot(down, med), frame_rot(down, med), frame_rot(down, med)]
     grip = [frame_rot(down, med), frame_rot(fwd, med), frame_rot(fwd, med)]
+    if f <= PRE_END:   # the wrist rises first, then goes forward (clear of the table and the bar top)
+        t = (f - 1) / (PRE_END - 1)
+        w0 = SHOULDER + down * (UPPER_LEN + FORE_LEN)
+        w1 = SHOULDER + down * UPPER_LEN + fwd * FORE_LEN + Vector((0, 0, PRE_UP))
+        rise, go = smooth(t / 0.5), smooth((t - 0.3) / 0.7)
+        w = Vector((w0.x + (w1.x - w0.x) * go, w0.y + (w1.y - w0.y) * go, w0.z + (w1.z - w0.z) * rise))
+        hand_rot = rest[2].to_quaternion().slerp(grip[2].to_quaternion(), smooth(t)).to_matrix()
+        out_back = Vector((-0.5, 1.0, -0.2)).normalized()   # elbow out and back while the hand rises
+        pole = out_back.lerp((down * UPPER_LEN).normalized(), go)
+        return ik_arm(0, down, fwd, med, w=w, hand_rot=hand_rot, pole=pole)
     if f <= REACH_END:
-        t = smooth((f - 1) / (REACH_END - 1))
-        return [a.to_quaternion().slerp(b.to_quaternion(), t).to_matrix() for a, b in zip(rest, grip)]
+        return ik_arm(PRE_UP * (1 - smooth((f - PRE_END) / (REACH_END - PRE_END))), down, fwd, med)
     if f <= GRIP_END:
         return grip
     th = math.radians(LIFT_DEG) * smooth((f - GRIP_END) / (FRAMES - GRIP_END))
-    up = Vector((0, -math.sin(th), -math.cos(th)))
+    up = Vector((-math.sin(a), -math.cos(a) * math.sin(th), -math.cos(a) * math.cos(th)))
     return [frame_rot(up, med), grip[1], grip[2]]
 
 
@@ -296,6 +334,49 @@ def solve_joint(arm, bones, k, axis, sign, radius, c, u, lo=-30.0, hi=110.0):
     return a
 
 
+def solve_tip(arm, bones, axes, sgns, radius, c, u, slack=0.0002, most=True):
+    """Joints 2 and 3 together: the most wrap (largest joint-2 curl; least with most=False) whose joint-3 curl puts the tip on the bar
+    while no part of segments 2-3 sinks deeper than `slack`. Returns (a2, a3) in degrees or None."""
+    pb2, pb3 = arm.pose.bones[bones[1]], arm.pose.bones[bones[2]]
+
+    def put(a2, a3):
+        pb2.rotation_quaternion = Quaternion(axes[1], sgns[1] * math.radians(a2))
+        pb3.rotation_quaternion = Quaternion(axes[2], sgns[2] * math.radians(a3))
+        bpy.context.view_layer.update()
+
+    def tip_gap(a2, a3):
+        put(a2, a3)
+        t = pb3.tail - c
+        return (t - u * t.dot(u)).length - (BAR_R + radius)
+
+    best = None
+    for a2 in [x * 2.0 for x in (range(55, -1, -1) if most else range(0, 56))]:
+        prev, hit = tip_gap(a2, 0.0), None
+        if prev <= 0:
+            continue
+        x = 0.0
+        while x < 110.0:
+            x += 2.0
+            g = tip_gap(a2, x)
+            if g <= 0:
+                lo, hi = x - 2.0, x
+                for _ in range(30):
+                    m = 0.5 * (lo + hi)
+                    if tip_gap(a2, m) > 0:
+                        lo = m
+                    else:
+                        hi = m
+                hit = hi; break
+        if hit is None:
+            continue
+        put(a2, hit)
+        if chain_gap(arm, bones[1:], radius, c, u) >= -slack:
+            best = (a2, hit); break
+    if best:
+        put(*best)
+    return best
+
+
 def curl_sign(arm, bone, axis, toward):
     """+1 if a positive turn about the bone's local axis moves its tail toward `toward` (armature space)."""
     pb = arm.pose.bones[bone]
@@ -352,8 +433,16 @@ def main():
                 axis, toward = Vector((1, 0, 0)), -hz     # curl toward the palm about the bone's x
             if f == 'Thumb' or k == 0:   # a finger keeps its first joint's sense (later joints point back under the bar)
                 sgn = curl_sign(arm, bones[k], axis, toward)
-            angles.append(solve_joint(arm, bones, k, axis, sgn, r, c, hx))
             axes.append(axis); sgns.append(sgn)
+            if k == 0:
+                angles.append(solve_joint(arm, bones, k, axis, sgn, r, c, hx, hi=90.0))   # knuckle at most 90 deg
+        tip = solve_tip(arm, bones, axes, sgns, r, c, hx, most=(f != 'Thumb'))   # the thumb stays clear of the index
+        if tip is None:   # no tip contact without sinking in: fall back to joint-by-joint chain contact
+            angles = angles[:1]
+            for k in (1, 2):
+                angles.append(solve_joint(arm, bones, k, axes[k], sgns[k], r, c, hx))
+        else:
+            angles += list(tip)
         curls[f] = (bones, axes, sgns, angles)
         gap = chain_gap(arm, bones, r, c, hx)
         tip = arm.pose.bones[bones[2]].tail - c
@@ -370,7 +459,8 @@ def main():
 
     # left arm hangs at the side for the whole take
     for n in ('Arm', 'ForeArm', 'Hand'):
-        set_matrix(arm, side_name(1, n), frame_rot(Vector((0, 0, -1)), Vector((1, 0, 0))))
+        a = math.radians(ABDUCT_DEG)
+        set_matrix(arm, side_name(1, n), frame_rot(Vector((math.sin(a), 0, -math.cos(a))), Vector((1, 0, 0))))
         arm.pose.bones[side_name(1, n)].keyframe_insert('rotation_quaternion', frame=1)
 
     # keys

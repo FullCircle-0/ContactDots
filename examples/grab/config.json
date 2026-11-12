@@ -1,0 +1,227 @@
+{
+  "name": "grab showcase",
+  "out": "out",
+  "characters": [
+    {
+      "role": "me",
+      "file": "grab.blend"
+    }
+  ],
+  "floorZ": 0,
+  "limits": "finger",
+  "dots": [
+    {
+      "name": "bar-grip-axis",
+      "object": "Bar",
+      "point": [
+        0,
+        0,
+        0.1
+      ],
+      "penetration": false
+    },
+    {
+      "name": "bar-top",
+      "object": "Bar",
+      "point": [
+        0,
+        0,
+        0.2
+      ],
+      "penetration": false
+    },
+    {
+      "name": "palm-over-bar",
+      "bone": "me.RightHand",
+      "offset": [
+        0,
+        0.06,
+        0
+      ],
+      "penetration": false
+    },
+    {
+      "name": "bar-foot.0",
+      "object": "Bar",
+      "point": [
+        0.012,
+        0,
+        -0.2
+      ]
+    },
+    {
+      "name": "bar-foot.1",
+      "object": "Bar",
+      "point": [
+        -0.012,
+        0,
+        -0.2
+      ]
+    },
+    {
+      "name": "bar-foot.2",
+      "object": "Bar",
+      "point": [
+        0,
+        0.012,
+        -0.2
+      ]
+    },
+    {
+      "name": "bar-foot.3",
+      "object": "Bar",
+      "point": [
+        0,
+        -0.012,
+        -0.2
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "id": "thumb-on-bar",
+      "kind": "touch",
+      "a": "me.R.thumb.tip",
+      "b": "prop:Bar",
+      "frames": [
+        20,
+        25,
+        30,
+        35,
+        40
+      ]
+    },
+    {
+      "id": "index-on-bar",
+      "kind": "touch",
+      "a": "me.R.index.tip",
+      "b": "prop:Bar",
+      "frames": [
+        20,
+        25,
+        30,
+        35,
+        40
+      ]
+    },
+    {
+      "id": "middle-on-bar",
+      "kind": "touch",
+      "a": "me.R.middle.tip",
+      "b": "prop:Bar",
+      "frames": [
+        20,
+        25,
+        30,
+        35,
+        40
+      ]
+    },
+    {
+      "id": "ring-on-bar",
+      "kind": "touch",
+      "a": "me.R.ring.tip",
+      "b": "prop:Bar",
+      "frames": [
+        20,
+        25,
+        30,
+        35,
+        40
+      ]
+    },
+    {
+      "id": "pinky-on-bar",
+      "kind": "touch",
+      "a": "me.R.pinky.tip",
+      "b": "prop:Bar",
+      "frames": [
+        20,
+        25,
+        30,
+        35,
+        40
+      ]
+    },
+    {
+      "id": "palm-on-bar",
+      "kind": "touch",
+      "a": "me.R.palm",
+      "b": "prop:Bar",
+      "frames": [
+        20,
+        25,
+        30,
+        35,
+        40
+      ]
+    },
+    {
+      "id": "bar-in-hand",
+      "kind": "hold",
+      "a": "bar-top",
+      "b": "me.RightHand",
+      "frames": [
+        20,
+        22,
+        24,
+        26,
+        28,
+        30,
+        32,
+        34,
+        36,
+        38,
+        40
+      ],
+      "max": 1
+    },
+    {
+      "id": "palm-faces-bar",
+      "kind": "align",
+      "a": {
+        "palm": "me.R"
+      },
+      "b": {
+        "from": "palm-over-bar",
+        "to": "bar-grip-axis"
+      },
+      "frames": [
+        20
+      ],
+      "maxDeg": 10
+    },
+    {
+      "id": "index-curl",
+      "kind": "range",
+      "a": {
+        "bone": "me.RightHandIndex1",
+        "axis": "y"
+      },
+      "b": {
+        "bone": "me.RightHand",
+        "axis": "y"
+      },
+      "axis": {
+        "bone": "me.RightHand",
+        "axis": "-x"
+      },
+      "min": 0,
+      "max": 100
+    },
+    {
+      "id": "bar-on-table",
+      "kind": "rest",
+      "a": [
+        "bar-foot.0",
+        "bar-foot.1",
+        "bar-foot.2",
+        "bar-foot.3"
+      ],
+      "b": "prop:Table",
+      "frames": [
+        1
+      ]
+    }
+  ]
+}
