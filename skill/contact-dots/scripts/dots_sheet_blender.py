@@ -32,7 +32,7 @@ ROLE_COLOURS = [(1.0, 0.33, 0.1, 1), (0.1, 0.8, 0.75, 1), (0.6, 0.9, 0.3, 1), (0
 COLOURS = {'pass': (1, 1, 0, 1), 'fail': (1, 0, 1, 1), 'object': (0.65, 0.35, 0.95, 1), 'surface': (0.95, 0.95, 0.95, 1),
            'arrowA': (0.45, 0.65, 1.0, 1), 'text': (1, 1, 1, 1)}      # never pure R/G/B
 # Palette values are display (sRGB) colours; emission() converts them to linear so the Standard view shows them as written.
-SKIN = [(0.92, 0.66, 0.48, 1), (0.48, 0.58, 0.8, 1)]   # warm body / cool prop, apart from the background
+SKIN = [(0.92, 0.66, 0.48, 1), (0.48, 0.58, 0.8, 1)]   # warm / cool by turns per mesh, apart from the background
 UP = Vector((0, 0, 1))
 
 

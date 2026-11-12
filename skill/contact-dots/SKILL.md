@@ -73,7 +73,7 @@ Structural and rotational checks use custom dots (on a bone, an object, or a mes
 directions (bone or object axis, a line between dots, a surface normal, a palm normal, a world
 axis). Full config: `references/config.md`. One worked example per check kind:
 `references/checks.md`.
-A whole scene with every check kind (a mannequin hand grips and lifts a bar): `examples/grab/`
+A whole scene with touch, hold, align, range and rest (a mannequin hand grips and lifts a bar): `examples/grab/`
 in the ContactDots repo (`config.json`; the expected result is PASS 10/10, 0 penetrations).
 
 Limits: preset `finger` (default: a contact may be at most 3 mm off at its frames and at
@@ -98,7 +98,7 @@ If they do not, the numbers are meaningless: fix the export, do not shift the nu
 
 ## LOOK at the sheet
 Numbers alone are not enough. Open `dots-sheet.png` (in the `out` folder) before reporting:
-bodies see-through grey, small dots per character, the measured pair joined by a line
+meshes see-through, warm and cool by turns on a dark background, a ring round a near-zero gap, small dots per character, the measured pair joined by a line
 (yellow = pass, magenta = fail), arrows for angle checks, a caption per tile (id, value,
 limit, PASS/FAIL). Check that each tile shows the parts you meant (right hand, right thigh,
 right frame). A pass on the wrong dot is a wrong answer.
