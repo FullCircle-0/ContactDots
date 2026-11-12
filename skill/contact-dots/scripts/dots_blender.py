@@ -32,13 +32,14 @@ Surfaces: '<role>' (whole body; for a dot on its own body the dot's part and its
 Prints DOTS_DONE <json> at the end.
 """
 import json
+import math
 import sys
 import time
 from pathlib import Path
 
 import bpy
 import numpy as np
-from mathutils import Vector
+from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -596,13 +597,146 @@ class Scene:
         return c.region_trees(exclude=self.excl.get(full, ()) if who == role else ())
 
 
+# ---------------------------------------------------------------- structural and rotational checks (B6b)
+
+PEN_EPS_MM = 0.005
+UNITS = {'seat': 'mm', 'rest': 'mm', 'hold': 'mm', 'distance': 'mm', 'align': 'deg', 'range': 'deg'}
+WORLD = {'x': Vector((1, 0, 0)), 'y': Vector((0, 1, 0)), 'z': Vector((0, 0, 1))}
+
+
+def _bone_of(spec, S):
+    """(armature object, pose bone) from {"armature", "bone"} or {"bone": "<role>.<canonical>"}."""
+    if spec.get('armature'):
+        arm = find_object(spec['armature'])
+        if arm.type != 'ARMATURE' or spec['bone'] not in arm.pose.bones:
+            raise RuntimeError('no bone %r on armature %r' % (spec['bone'], spec['armature']))
+        return arm, arm.pose.bones[spec['bone']]
+    role, _, canon_name = spec['bone'].partition('.')
+    c = S.chars.get(role)
+    if c is None or not c.has(canon_name):
+        raise RuntimeError('no bone %r (use <role>.<canonical bone>, or armature + bone)' % spec['bone'])
+    return c.arm, c.bone(canon_name)
+
+
+def _dot(S, name):
+    if name not in S.dot_pos:
+        raise RuntimeError('no dot %r (custom dots: %s)' % (name, sorted(S.custom)[:20]))
+    return S.dot_pos[name]
+
+
+def _world_axis(axis):
+    axis = str(axis).lower()
+    v = WORLD.get(axis.lstrip('+-'))
+    if v is None:
+        raise RuntimeError('world axis %r: use x, y, z, -x, -y or -z' % axis)
+    return -v if axis.startswith('-') else v.copy()
+
+
+def direction(spec, S):
+    """A direction (B6b) -> (unit world vector, origin). Kinds: {"bone"[, "armature"], "axis"}, {"object", "axis"},
+    {"from", "to"} dots, {"normal": dot, "surface"} (the face normal under the dot; floor is +z), {"palm": "<role>.R|L"},
+    {"world": "z"}; a plain string is a world axis."""
+    if isinstance(spec, str):
+        spec = {'world': spec}
+    if 'world' in spec:
+        return _world_axis(spec['world']), Vector()
+    if 'from' in spec:
+        a, b = _dot(S, spec['from']), _dot(S, spec['to'])
+        if (b - a).length < 1e-9:
+            raise RuntimeError('direction from %s to %s: the dots coincide' % (spec['from'], spec['to']))
+        return (b - a).normalized(), a
+    if 'normal' in spec:
+        p = _dot(S, spec['normal'])
+        trees = S.surface(spec.get('surface', 'floor'), spec['normal'])
+        if trees == 'floor':
+            return Vector((0, 0, 1)), Vector((p.x, p.y, S.floor_z))
+        hit = nearest(trees, p)
+        if hit is None:
+            raise RuntimeError('direction normal under %s: no surface %r' % (spec['normal'], spec.get('surface')))
+        return hit[1].normalized(), hit[0]
+    if 'palm' in spec:
+        role, _, side = spec['palm'].partition('.')
+        c = S.chars.get(role)
+        if c is None or side not in SIDES:
+            raise RuntimeError('direction palm %r: use <role>.R or <role>.L' % spec['palm'])
+        centre, n = c.palm(side)
+        return n, centre
+    if 'bone' in spec:
+        arm, pb = _bone_of(spec, S)
+        m = arm.matrix_world @ pb.matrix
+        return axis_of(m, spec.get('axis', 'y')), m.translation
+    if 'object' in spec:
+        o = find_object(spec['object'])
+        return axis_of(o.matrix_world, spec.get('axis', 'z')), o.matrix_world.translation
+    raise RuntimeError('direction %r: give world, from/to, normal, palm, bone or object' % (spec,))
+
+
+def ref_matrix(spec, S):
+    """World matrix (scale removed) of a hold's frame of reference: "world", an object name, "<role>.<bone>",
+    or {"armature", "bone"} / {"object"}."""
+    if spec in (None, 'world'):
+        return Matrix.Identity(4)
+    if isinstance(spec, str):
+        if '.' in spec and spec.partition('.')[0] in S.chars:
+            spec = {'bone': spec}
+        else:
+            spec = {'object': spec}
+    if 'bone' in spec:
+        arm, pb = _bone_of(spec, S)
+        m = arm.matrix_world @ pb.matrix
+    else:
+        m = find_object(spec['object']).matrix_world
+    loc, rot, _ = m.decompose()
+    return Matrix.Translation(loc) @ rot.to_matrix().to_4x4()
+
+
+def _angle(a, b):
+    return math.degrees(a.angle(b)) if a.length > 1e-12 and b.length > 1e-12 else 0.0
+
+
+def eval_check(ch, S, hold_ref):
+    """One check at the current frame -> {'v': number, 'p', 'q' (points for the sheet), ...extras}."""
+    kind = ch['kind']
+    if kind in ('seat', 'distance'):
+        p, q = _dot(S, ch['a']), _dot(S, ch['b'])
+        return {'v': round((p - q).length * 1000.0, 3), 'p': v3(p), 'q': v3(q)}
+    if kind == 'rest':
+        gaps, worst = {}, None
+        for name in ch['a']:
+            g = S.gap(name, S.surface(ch['b'], name))
+            if g is None:
+                raise RuntimeError('check %s: dot %s has no surface %r' % (ch['id'], name, ch['b']))
+            gaps[name] = round(g[0], 3)
+            if worst is None or g[0] > worst[0]:
+                worst = g
+        return {'v': max(gaps.values()), 'min': min(gaps.values()), 'gaps': gaps, 'p': v3(worst[3]), 'q': v3(worst[2])}
+    if kind == 'hold':
+        p = _dot(S, ch['a'])
+        local = ref_matrix(ch.get('b', 'world'), S).inverted() @ p
+        first = hold_ref.setdefault(ch['id'], local.copy())
+        return {'v': round((local - first).length * 1000.0, 3), 'p': v3(p),
+                'q': v3(ref_matrix(ch.get('b', 'world'), S) @ first)}
+    if kind in ('align', 'range'):
+        a, oa = direction(ch['a'], S)
+        b, ob = direction(ch['b'], S)
+        if kind == 'range' and ch.get('axis') is not None:
+            c, _ = direction(ch['axis'], S)
+            ang = math.degrees(math.atan2(c.dot(b.cross(a)), b.dot(a)))
+        else:
+            ang = _angle(a, b)
+        return {'v': round(ang, 3), 'p': v3(oa), 'q': v3(ob), 'da': v3(a), 'db': v3(b)}
+    raise RuntimeError('check %s: kind %r (use seat, rest, hold, distance, align, range)' % (ch.get('id'), kind))
+
+
 def measure(cfg, chars=None, props=None):
     began = time.time()
     if chars is None:
         chars, props = load_scene(cfg)
     sc = bpy.context.scene
-    contacts = cfg.get('contacts') or []
-    checks = cfg.get('checks') or []
+    contacts = list(cfg.get('contacts') or [])
+    checks = []
+    for c in cfg.get('checks') or []:
+        (contacts if c.get('kind', 'touch') == 'touch' else checks).append(c)
     frames = frame_list(cfg.get('frames', 'all'), chars)
     for c in contacts + checks:
         c['frames'] = [int(f) for f in (c.get('frames') or frames)]
@@ -867,12 +1001,169 @@ def selftest_rig(kind):
     return None
 
 
+# ---------------------------------------------------------------- rigid selftest (Spec A7, A8, A9)
+
+RIGID_FRAMES = 14
+TILT_MM = 6.0
+SLIDE_MM = 5.0
+
+
+def hinge_deg(f):
+    return -10.0 + 10.0 * (f - 1)                         # -10 .. 120 over frames 1..14
+
+
+def _empty(name, location=(0, 0, 0), rotation=(0, 0, 0)):
+    o = bpy.data.objects.new(name, None); bpy.context.scene.collection.objects.link(o)
+    o.location = location; o.rotation_euler = rotation
+    return o
+
+
+def _armature(name, bones, location=(0, 0, 0)):
+    """bones: (name, head, tail, parent) in armature space."""
+    data = bpy.data.armatures.new(name)
+    arm = bpy.data.objects.new(name, data); bpy.context.scene.collection.objects.link(arm)
+    arm.location = location
+    bpy.context.view_layer.objects.active = arm
+    bpy.ops.object.mode_set(mode='EDIT')
+    made = {}
+    for n, head, tail, parent in bones:
+        eb = data.edit_bones.new(n); eb.head, eb.tail, eb.roll = head, tail, 0.0
+        if parent:
+            eb.parent = made[parent]
+        made[n] = eb
+    bpy.ops.object.mode_set(mode='OBJECT')
+    return arm
+
+
+def _linear(obj):
+    ad = obj.animation_data
+    if ad and ad.action:
+        for fc in getattr(ad.action, 'fcurves', ()):
+            for k in fc.keyframe_points:
+                k.interpolation = 'LINEAR'
+
+
+def build_rigid_scene():
+    """No characters. Table (1 m cube, top z 0.5); a flat box and a box tipped on one bottom edge (far edge 6 mm up);
+    peg/socket empties 0 and 4 mm apart; a moving Carrier bone holding one box fixed and sliding another 5 mm;
+    align objects at 0, 15 and 90 degrees; a Hinge armature whose Lid sweeps -10..120 degrees about Base x."""
+    import bmesh
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    sc = bpy.context.scene; sc.frame_start, sc.frame_end = 1, RIGID_FRAMES
+    cube = lambda s: (lambda bm: bmesh.ops.create_cube(bm, size=s))
+    table = _mesh_object('Table', cube(1.0))
+    _mesh_object('BoxFlat', cube(0.2), (-0.3, 0.0, 0.6))
+    tilt = _mesh_object('BoxTilt', cube(0.2))
+    th = math.asin(TILT_MM / 1000.0 / 0.2)
+    pivot_w, pivot_l = Vector((0.3, -0.1, 0.5)), Vector((0.0, -0.1, -0.1))
+    tilt.matrix_world = Matrix.Translation(pivot_w) @ Matrix.Rotation(th, 4, 'X') @ Matrix.Translation(-pivot_l)
+    _empty('Socket0', (0.0, 0.3, 0.6)); _empty('Peg0', (0.0, 0.3, 0.6))
+    _empty('Socket4', (0.1, 0.3, 0.6)); _empty('Peg4', (0.1, 0.3, 0.604))
+    for n, deg in (('Ref', 0), ('Tilt0', 0), ('Tilt15', 15), ('Tilt90', 90)):
+        _empty(n, (0.4, 0.4, 0.6), (math.radians(deg), 0, 0))
+    carrier = _armature('Carrier', [('Hand', (0, 0, 0), (0, 0.1, 0), None)], (0, -0.4, 1.0))
+    for f in (1, RIGID_FRAMES):
+        t = (f - 1) / (RIGID_FRAMES - 1)
+        carrier.location = (0.5 * t, -0.4, 1.0 + 0.2 * t); carrier.rotation_euler = (0.3 * t, 0, math.radians(90) * t)
+        carrier.keyframe_insert('location', frame=f); carrier.keyframe_insert('rotation_euler', frame=f)
+    _linear(carrier)
+    for n, x in (('Carried', 0.0), ('Sliding', 0.2)):
+        b = _mesh_object(n, cube(0.1))
+        b.parent = carrier; b.parent_type = 'BONE'; b.parent_bone = 'Hand'
+        b.location = (x, 0, 0)
+        if n == 'Sliding':
+            b.keyframe_insert('location', frame=1)
+            b.location = (x + SLIDE_MM / 1000.0, 0, 0); b.keyframe_insert('location', frame=RIGID_FRAMES)
+            _linear(b)
+    hinge = _armature('Hinge', [('Base', (0, 0, 0), (0, 0.1, 0), None), ('Lid', (0, 0.1, 0), (0, 0.2, 0), 'Base')],
+                      (-0.4, 0.4, 0.6))
+    lid = hinge.pose.bones['Lid']; lid.rotation_mode = 'XYZ'
+    for f in range(1, RIGID_FRAMES + 1):
+        lid.rotation_euler = (math.radians(hinge_deg(f)), 0, 0)
+        lid.keyframe_insert('rotation_euler', frame=f)
+    _linear(hinge)
+    sc.frame_set(1)
+    return table
+
+
+def rigid_config(out):
+    """Custom dots and checks of the rigid scene; each check carries want (value, or frame -> value) and expect."""
+    corners = [(x, y, -0.1) for x in (-0.1, 0.1) for y in (-0.1, 0.1)]
+    dots = []
+    for box in ('BoxFlat', 'BoxTilt'):
+        dots += [{'name': '%s.%d' % (box, i), 'object': box, 'point': list(c)} for i, c in enumerate(corners)]
+    dots += [{'name': n, 'object': n} for n in ('Socket0', 'Peg0', 'Socket4', 'Peg4', 'Carried', 'Sliding')]
+    dots += [{'name': 'mark-a', 'object': 'Table', 'point': [-0.05, 0.4, 0.5], 'penetration': False},
+             {'name': 'mark-b', 'object': 'Table', 'point': [0.05, 0.4, 0.5], 'penetration': False}]
+    carrier = {'armature': 'Carrier', 'bone': 'Hand'}
+    hb = lambda bone, axis: {'armature': 'Hinge', 'bone': bone, 'axis': axis}
+    all_f = list(range(1, RIGID_FRAMES + 1))
+    checks = [
+        {'id': 'seat-0', 'kind': 'seat', 'a': 'Peg0', 'b': 'Socket0', 'want': 0.0, 'expect': 'pass'},
+        {'id': 'seat-4', 'kind': 'seat', 'a': 'Peg4', 'b': 'Socket4', 'want': 4.0, 'expect': 'fail'},
+        {'id': 'rest-flat', 'kind': 'rest', 'a': ['BoxFlat.%d' % i for i in range(4)], 'b': 'prop:Table',
+         'want': 0.0, 'expect': 'pass'},
+        {'id': 'rest-tilted', 'kind': 'rest', 'a': ['BoxTilt.%d' % i for i in range(4)], 'b': 'prop:Table',
+         'want': TILT_MM, 'expect': 'fail'},
+        {'id': 'hold-carried', 'kind': 'hold', 'a': 'Carried', 'b': carrier, 'want': 0.0, 'expect': 'pass'},
+        {'id': 'hold-sliding', 'kind': 'hold', 'a': 'Sliding', 'b': carrier, 'frames': [1, RIGID_FRAMES],
+         'want': {'1': 0.0, str(RIGID_FRAMES): SLIDE_MM}, 'expect': 'fail'},
+        {'id': 'distance-100', 'kind': 'distance', 'a': 'mark-a', 'b': 'mark-b', 'min': 99.0, 'max': 101.0,
+         'want': 100.0, 'expect': 'pass'},
+        {'id': 'distance-far', 'kind': 'distance', 'a': 'mark-a', 'b': 'mark-b', 'min': 120.0, 'max': 200.0,
+         'want': 100.0, 'expect': 'fail'},
+        {'id': 'align-0', 'kind': 'align', 'a': {'object': 'Tilt0', 'axis': 'z'}, 'b': {'object': 'Ref', 'axis': 'z'},
+         'maxDeg': 20, 'want': 0.0, 'expect': 'pass'},
+        {'id': 'align-15', 'kind': 'align', 'a': {'object': 'Tilt15', 'axis': 'z'}, 'b': {'object': 'Ref', 'axis': 'z'},
+         'maxDeg': 20, 'want': 15.0, 'expect': 'pass'},
+        {'id': 'align-90', 'kind': 'align', 'a': {'object': 'Tilt90', 'axis': 'z'}, 'b': {'object': 'Ref', 'axis': 'z'},
+         'maxDeg': 20, 'want': 90.0, 'expect': 'fail'},
+        {'id': 'align-line', 'kind': 'align', 'a': {'from': 'mark-a', 'to': 'mark-b'}, 'b': {'world': 'x'},
+         'want': 0.0, 'expect': 'pass'},
+        {'id': 'align-normal', 'kind': 'align', 'a': {'normal': 'BoxFlat.0', 'surface': 'prop:Table'}, 'b': 'z',
+         'want': 0.0, 'expect': 'pass'},
+        {'id': 'hinge-sweep', 'kind': 'range', 'a': hb('Lid', 'y'), 'b': hb('Base', 'y'), 'axis': hb('Base', 'x'),
+         'min': 0, 'max': 110, 'want': {str(f): hinge_deg(f) for f in all_f}, 'expect': 'fail'},
+        {'id': 'hinge-open', 'kind': 'range', 'a': hb('Lid', 'y'), 'b': hb('Base', 'y'), 'axis': hb('Base', 'x'),
+         'min': 0, 'max': 110, 'frames': list(range(2, 13)), 'want': {str(f): hinge_deg(f) for f in range(2, 13)},
+         'expect': 'pass'},
+    ]
+    return {'out': str(out), 'frames': {'range': [1, RIGID_FRAMES]}, 'floorZ': None, 'dots': dots, 'checks': checks}
+
+
+def want_at(ch, f):
+    w = ch.get('want')
+    return w.get(str(f)) if isinstance(w, dict) else w
+
+
+def rigid_selftest(out):
+    table = build_rigid_scene()
+    props = [o for o in bpy.data.objects if o.type == 'MESH']
+    cfg = rigid_config(out)
+    result = measure(cfg, [], props)
+    ok, rows = True, []
+    for ch in result['checks']:
+        worst = None
+        for f, val in sorted(ch['values'].items(), key=lambda kv: int(kv[0])):
+            want = want_at(ch, f)
+            err = abs(val['v'] - want) if want is not None else 0.0
+            if worst is None or err > worst[0]:
+                worst = (err, f, val['v'], want)
+        good = worst is not None and worst[0] <= 0.1
+        ok &= good
+        rows.append('rigid %s f%s want %s got %.3f %s %s' % (ch['id'], worst[1], worst[3], worst[2], ch['unit'],
+                                                             'ok' if good else 'OFF') if worst else
+                    'rigid %s no values OFF' % ch['id'])
+    return ok, rows
+
+
 def selftest(out, rig_names=None, bone_map=None):
+    ok_r, rows_r = rigid_selftest(Path(out) / 'rigid')
     arm, body, cube = build_selftest_scene(rig_names)
     cfg = selftest_config(out)
     chars = [Character('rig', [arm, body], bone_map=bone_map)]
     result = measure(cfg, chars, [cube])
-    ok, rows = True, []
+    ok, rows = ok_r, list(rows_r)
     for c in result['contacts']:
         for i, want in enumerate(SELFTEST_GAPS, 1):
             got = c['gaps'].get(str(i), {}).get('mm')
@@ -910,7 +1201,10 @@ def main(argv):
         return 0 if selftest(out, selftest_rig(rig)) else 1
     if argv and argv[0] == '--make-sample':                 # the selftest scene saved as a .blend (tests, examples)
         rig = argv[argv.index('--rig') + 1] if '--rig' in argv else 'plain'
-        build_selftest_scene(selftest_rig(rig))
+        if rig == 'rigid':
+            build_rigid_scene()
+        else:
+            build_selftest_scene(selftest_rig(rig))
         bpy.ops.wm.save_as_mainfile(filepath=str(Path(argv[1]).resolve()), check_existing=False)
         print('DOTS_SAMPLE', argv[1], flush=True)
         return 0

@@ -179,23 +179,146 @@ def validate(cfg, base):
     if not (fr == 'all' or (isinstance(fr, list) and all(isinstance(x, int) for x in fr))
             or (isinstance(fr, dict) and isinstance(fr.get('range'), list) and len(fr['range']) == 2)):
         raise Skipped('bad config: frames must be "all", a list of frame numbers or {"range": [first, last]}')
+    dot_names = validate_dots(cfg.get('dots'))
     ids = set()
-    for i, c in enumerate(cfg.get('contacts') or []):
+    contacts = [dict(c) if isinstance(c, dict) else c for c in cfg.get('contacts') or []]
+    for i, c in enumerate(contacts):
         if not isinstance(c, dict) or not c.get('a') or not c.get('b'):
             raise Skipped('bad config: contacts[%d] needs "a" and "b"' % i)
         c.setdefault('id', 'contact%d' % i)
-        if c['id'] in ids:
-            raise Skipped('bad config: duplicate id %r' % c['id'])
-        ids.add(c['id'])
-        if c['a'].split('.')[0] not in roles:
-            raise Skipped('bad config: contact %s: "a" must start with a character role %s' % (c['id'], sorted(roles)))
+        validate_touch(c, ids, roles, dot_names)
+    checks = []
+    for i, c in enumerate(cfg.get('checks') or []):
+        if not isinstance(c, dict):
+            raise Skipped('bad config: checks[%d] is not an object' % i)
+        c = dict(c); c.setdefault('id', 'check%d' % i); c.setdefault('kind', 'touch')
+        if c['kind'] == 'touch':
+            if not c.get('a') or not c.get('b'):
+                raise Skipped('bad config: check %s needs "a" and "b"' % c['id'])
+            validate_touch(c, ids, roles, dot_names)
+            contacts.append({k: v for k, v in c.items() if k != 'kind'})
+            continue
+        validate_check(c, ids, dot_names)
+        checks.append(c)
+    out['contacts'], out['checks'] = contacts, checks
     out['limits'] = limits_of(cfg.get('limits'))
     if cfg.get('snapshot'):
         out['snapshot'] = dict(cfg['snapshot'], path=_abs(base, cfg['snapshot']['path']))
     return out
 
 
+KINDS = ('touch', 'seat', 'rest', 'hold', 'distance', 'align', 'range')
+DIRECTION_KEYS = ('world', 'from', 'normal', 'palm', 'bone', 'object')
+
+
+def validate_dots(dots):
+    names = set()
+    for i, d in enumerate(dots or []):
+        if not isinstance(d, dict) or not d.get('name'):
+            raise Skipped('bad config: dots[%d] needs a "name"' % i)
+        if d['name'] in names:
+            raise Skipped('bad config: duplicate dot name %r' % d['name'])
+        if not d.get('bone') and not d.get('object'):
+            raise Skipped('bad config: dot %s needs "bone" or "object"' % d['name'])
+        r = d.get('radius', 0)
+        if r != 'measure' and not isinstance(r, (int, float)):
+            raise Skipped('bad config: dot %s radius must be mm, "measure" or 0' % d['name'])
+        names.add(d['name'])
+    return names
+
+
+def _new_id(c, ids):
+    if c['id'] in ids:
+        raise Skipped('bad config: duplicate id %r' % c['id'])
+    ids.add(c['id'])
+
+
+def validate_touch(c, ids, roles, dot_names):
+    _new_id(c, ids)
+    if c['a'] not in dot_names and c['a'].split('.')[0] not in roles:
+        raise Skipped('bad config: contact %s: "a" must be a custom dot or start with a character role %s' % (
+            c['id'], sorted(roles)))
+
+
+def _direction_ok(d):
+    return isinstance(d, str) or (isinstance(d, dict) and any(k in d for k in DIRECTION_KEYS))
+
+
+def validate_check(c, ids, dot_names):
+    kind = c['kind']
+    if kind not in KINDS:
+        raise Skipped('bad config: check %s: kind %r (use %s)' % (c['id'], kind, ', '.join(KINDS)))
+    _new_id(c, ids)
+    for key in ('max', 'min', 'maxDeg', 'offMm', 'insideMm'):
+        if key in c and not isinstance(c[key], (int, float)):
+            raise Skipped('bad config: check %s: %s must be a number' % (c['id'], key))
+    if kind in ('seat', 'distance'):
+        for k in ('a', 'b'):
+            if c.get(k) not in dot_names:
+                raise Skipped('bad config: check %s: %s must be a dot name (custom dots: %s)' % (
+                    c['id'], k, sorted(dot_names)[:10]))
+        if kind == 'distance' and 'min' not in c and 'max' not in c:
+            raise Skipped('bad config: check %s: distance needs "min" and/or "max" (mm)' % c['id'])
+    elif kind == 'rest':
+        if not isinstance(c.get('a'), list) or len(c['a']) < 3 or not isinstance(c.get('b'), str):
+            raise Skipped('bad config: check %s: rest needs "a": 3 or more dots and "b": a surface' % c['id'])
+    elif kind == 'hold':
+        if not isinstance(c.get('a'), str):
+            raise Skipped('bad config: check %s: hold needs "a": a dot' % c['id'])
+    else:
+        for k in ('a', 'b') + (('axis',) if c.get('axis') is not None else ()):
+            if not _direction_ok(c.get(k)):
+                raise Skipped('bad config: check %s: %s must be a direction (%s, or a world axis)' % (
+                    c['id'], k, ', '.join(DIRECTION_KEYS)))
+        if kind == 'range' and 'min' not in c and 'max' not in c:
+            raise Skipped('bad config: check %s: range needs "min" and/or "max" (degrees)' % c['id'])
+
+
 # ---------------------------------------------------------------- judging
+
+INF = float('inf')
+
+
+def _short(x):
+    if isinstance(x, list):
+        return '%s+%d' % (x[0], len(x) - 1) if x else '?'
+    if isinstance(x, dict):
+        return ' '.join(str(v) for v in x.values())
+    return str(x)
+
+
+def judge_check(c, limits):
+    """One structural or rotational check -> a summary row; sets ok, worst and limit on the check."""
+    kind, vals, unit = c['kind'], c.get('values') or {}, c.get('unit', 'mm')
+    what = '%s -> %s' % (_short(c.get('a')), _short(c.get('b')))
+    if not vals:
+        c['ok'] = False
+        return {'id': c['id'], 'kind': kind, 'what': what, 'ok': False, 'reason': 'not measured'}
+    hi = max(vals, key=lambda f: vals[f]['v']); lo = min(vals, key=lambda f: vals[f]['v'])
+    v_hi, v_lo = vals[hi]['v'], vals[lo]['v']
+    if kind == 'rest':
+        off, inside = c.get('offMm', limits['offMm']), c.get('insideMm', limits['insideMm'])
+        lo = min(vals, key=lambda f: vals[f]['min']); v_lo = vals[lo]['min']
+        ok = v_hi <= off and v_lo >= -inside
+        limit = 'every dot off <= %g mm, inside <= %g mm' % (off, inside)
+        text = 'highest dot %+.1f mm f%s, lowest %+.1f mm f%s' % (v_hi, hi, v_lo, lo)
+        frame = lo if v_lo < -inside else hi
+    elif kind in ('distance', 'range'):
+        mn, mx = c.get('min', -INF), c.get('max', INF)
+        ok = v_lo >= mn and v_hi <= mx
+        limit = 'inside [%g, %g] %s' % (mn, mx, unit)
+        text = 'from %.1f %s f%s to %.1f %s f%s' % (v_lo, unit, lo, v_hi, unit, hi)
+        frame = lo if v_lo < mn else hi
+    else:
+        default = {'seat': 1.0, 'hold': limits['offMm'], 'align': 5.0}[kind]
+        mx = c.get('maxDeg' if kind == 'align' else 'max', default)
+        ok = v_hi <= mx
+        limit = '<= %g %s' % (mx, unit)
+        text = 'worst %.1f %s f%s' % (v_hi, unit, hi)
+        frame = hi
+    c.update(ok=ok, worst=v_hi, worstFrame=int(hi), least=v_lo, leastFrame=int(lo), limit=limit)
+    return {'id': c['id'], 'kind': kind, 'what': what, 'ok': ok, 'text': '%s (limit %s)' % (text, limit),
+            'frame': int(frame)}
 
 def judge(payload, limits):
     """Apply the limits. Adds 'verdict', and 'worstMm'/'ok' per contact; returns the verdict."""
@@ -219,6 +342,8 @@ def judge(payload, limits):
                          gaps[key_at]['mm'], int(key_at), gaps[key_at]['dot'], gaps[key_at]['surface'],
                          gaps[deep_at]['mm'], int(deep_at)),
                      'frame': int(deep_at) if gaps[deep_at]['mm'] < -inside else int(key_at)})
+    for c in payload.get('checks', []):
+        rows.append(judge_check(c, limits))
     pens = [p for p in payload.get('penetrations', []) if p['mm'] < -inside]
     verdict = {'limits': limits, 'checks': rows, 'penetrationsOverLimit': len(pens),
                'status': 'PASS' if all(r['ok'] for r in rows) and not pens else 'FAIL'}
@@ -306,8 +431,30 @@ def cmd_selftest(args, echo=print):
         echo(skipped(str(why))[0])
         return 2
     ok = any(l.strip() == 'DOTS_SELFTEST PASS' for l in lines)
-    echo('dots: %s selftest (known gaps within 0.1 mm) | %s s | %s' % ('PASS' if ok else 'FAIL', seconds, out))
+    ok &= judge_rigid(out / 'rigid' / 'dots.json', echo)
+    echo('dots: %s selftest (known gaps and angles within 0.1, rigid checks judged as expected) | %s s | %s' % (
+        'PASS' if ok else 'FAIL', seconds, out))
     return 0 if ok else 1
+
+
+def judge_rigid(path, echo=print):
+    """The rigid selftest's checks, judged with the default limits, must pass or fail as each one's 'expect' says."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        echo('  rigid selftest: no %s' % path)
+        return False
+    judge(payload, limits_of(None))
+    good = True
+    for c in payload['checks']:
+        right = c['ok'] == (c.get('expect') == 'pass')
+        good &= right
+        if not right:
+            echo('  rigid %s judged %s, expected %s (%s)' % (c['id'], 'pass' if c['ok'] else 'fail', c.get('expect'),
+                                                             c.get('limit')))
+    payload['summary'] = describe(payload, 'rigid selftest')
+    Path(path).write_text(json.dumps(payload, indent=1), encoding='utf-8')
+    return good
 
 
 def describe_bones(path, arms):
