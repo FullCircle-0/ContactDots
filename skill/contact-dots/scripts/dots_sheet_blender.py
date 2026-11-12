@@ -42,6 +42,7 @@ MARK_DEPTH = 0.6        # marks drawn in front sit this far before the camera (o
 TRIAD_MM, TRIAD_PX = 30, 40
 TRIAD_ZOOM = 1.6        # a tile may widen this much to show whole triads
 DISC_ALPHA = 0.65        # disc fill: strong enough to read on its own, the surface still shows through
+DISC_R = 0.018          # disc radius (m): wider than a fingertip, so the fill shows round the finger
 UP = Vector((0, 0, 1))
 
 
@@ -464,8 +465,8 @@ def main(job_path):
         if hit:                             # the disc stays on the real surface (depth-tested); edge and normal in front
             obj = hit[0]; n = Vector(tile['n']); key = obj.name if obj else 'floor'
             tint = complement(colour[obj]) if obj else COLOURS['floorDisc']; edge = emission('DiscEdge_' + key, tint)
-            marks.disc(q, n, 0.0125, translucent('Disc_' + key, tint, DISC_ALPHA))
-            marks.ring(q + lift(MARK_DEPTH + 0.3), n, 0.0125, r * 0.3, edge)
+            marks.disc(q, n, DISC_R, translucent('Disc_' + key, tint, DISC_ALPHA))
+            marks.ring(q + lift(MARK_DEPTH + 0.3), n, DISC_R, r * 0.3, edge)
             marks.arrow(q + lift(MARK_DEPTH + 0.3), n, 0.025, r * 0.4, edge, rim)
         for origin, (x, y, z) in triads:
             for k in (1.0, 0.8, 0.6):                         # shorter arms until the whole triad (cone tips too)
