@@ -41,6 +41,9 @@ import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bone_maps  # noqa: E402
+
 FINGERS = ('Thumb', 'Index', 'Middle', 'Ring', 'Pinky')
 FINGERS_LOWER = tuple(f.lower() for f in FINGERS)
 SIDES = {'R': 'Right', 'L': 'Left'}
@@ -92,10 +95,6 @@ def v3(p):
 
 # ---------------------------------------------------------------- characters
 
-def canon(name, prefix):
-    return name[len(prefix):] if prefix and name.startswith(prefix) else name.rsplit(':', 1)[-1]
-
-
 def is_skinned_to(o, arm):
     return o.type == 'MESH' and any(m.type == 'ARMATURE' and m.object == arm for m in o.modifiers)
 
@@ -110,16 +109,15 @@ class Character:
         arms = [o for o in objects if o.type == 'ARMATURE']
         if armature:
             arms = [o for o in arms if o.name == armature] or [o for o in arms if armature in o.name]
-        arms = [o for o in arms if any(b.name.endswith('Hips') for b in o.data.bones)] or (arms if bone_map else [])
         if not arms:
-            raise RuntimeError('%s: no armature with a Hips bone in the file' % role)
-        self.arm = arms[0]
-        hips = next((b.name for b in self.arm.data.bones if b.name.endswith('Hips')), '')
-        self.prefix = hips[:-4]
-        self.map = dict(bone_map or {})
-        back = {v: k for k, v in self.map.items()}
-        self.names = {b.name: back.get(b.name, canon(b.name, self.prefix)) for b in self.arm.data.bones}   # rig -> canonical
-        self.rig_name = {c: r for r, c in self.names.items()}
+            raise RuntimeError('%s: no armature%s in the file' % (role, ' named %r' % armature if armature else ''))
+        scored = [(bone_maps.propose([b.name for b in a.data.bones], bone_map), a) for a in arms]
+        self.proposal, self.arm = max(scored, key=lambda s: s[0]['matches'])
+        if not self.proposal['usable']:
+            raise RuntimeError(bone_maps.no_map_message(role, self.proposal, [b.name for b in self.arm.data.bones]))
+        self.rig_name = dict(self.proposal['map'])                                                       # canonical -> rig
+        back = {r: c for c, r in self.rig_name.items()}
+        self.names = {b.name: back.get(b.name, b.name) for b in self.arm.data.bones}                     # rig -> canonical
         self.parent = {self.names[b.name]: (self.names[b.parent.name] if b.parent else None) for b in self.arm.data.bones}
         meshes = [o for o in objects if is_skinned_to(o, self.arm)]
         if body:
@@ -532,7 +530,8 @@ def measure(cfg, chars=None, props=None):
         closeup_at[str(f)] = {k: v3(p) for k, p in S.dot_pos.items()}
     result = {'version': 1, 'blender': bpy.app.version_string, 'frames': frames, 'calibFrame': calib,
               'floorZ': S.floor_z, 'observeMm': observe,
-              'roles': {c.role: {'armature': c.arm.name, 'body': c.body.name, 'verts': c.nverts, 'regions': len(c.regions)}
+              'roles': {c.role: {'armature': c.arm.name, 'body': c.body.name, 'bonePreset': c.proposal['preset'],
+                                 'boneMatches': c.proposal['matches'], 'verts': c.nverts, 'regions': len(c.regions)}
                         for c in chars},
               'warnings': warnings, 'roots': roots,
               'skinMm': {k: round(v, 3) for k, v in S.skin.items()},
@@ -688,6 +687,19 @@ def build_selftest_scene(rig_names=None):
     return arm, body, cube
 
 
+def selftest_rig(kind):
+    """Bone names of the selftest character: mixamo (prefixed), unity (no finger end bone) or unknown."""
+    names = [b[0] for b in SELFTEST_BONES]
+    if kind == 'mixamo':
+        return {n: 'mixamorig:' + n for n in names}
+    if kind == 'unity':
+        rig = {n: bone_maps.PRESETS['unity'].get(n) for n in names}
+        return rig
+    if kind == 'unknown':
+        return {n: 'bone_%03d' % i for i, n in enumerate(names)}
+    return None
+
+
 def selftest(out, rig_names=None, bone_map=None):
     arm, body, cube = build_selftest_scene(rig_names)
     cfg = selftest_config(out)
@@ -709,10 +721,34 @@ def selftest(out, rig_names=None, bone_map=None):
     return ok
 
 
+def bones(path):
+    """Every armature in a file, its bones and the proposed map (one DOTS_BONES json line)."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    new = load_file(path)
+    out = []
+    for a in [o for o in new if o.type == 'ARMATURE']:
+        names = [b.name for b in a.data.bones]
+        p = bone_maps.propose(names)
+        out.append({'armature': a.name, 'bones': names, 'preset': p['preset'], 'usable': p['usable'],
+                    'scores': p['scores'], 'map': p['map'], 'unmatched': p['unmatched'],
+                    'skinnedMeshes': [o.name for o in new if is_skinned_to(o, a)]})
+    print('DOTS_BONES', json.dumps(out), flush=True)
+    return 0
+
+
 def main(argv):
     if argv and argv[0] == '--selftest':
         out = Path(argv[1]) if len(argv) > 1 else Path(bpy.app.tempdir) / 'dots-selftest'
-        return 0 if selftest(out) else 1
+        rig = argv[argv.index('--rig') + 1] if '--rig' in argv else 'plain'
+        return 0 if selftest(out, selftest_rig(rig)) else 1
+    if argv and argv[0] == '--make-sample':                 # the selftest scene saved as a .blend (tests, examples)
+        rig = argv[argv.index('--rig') + 1] if '--rig' in argv else 'plain'
+        build_selftest_scene(selftest_rig(rig))
+        bpy.ops.wm.save_as_mainfile(filepath=str(Path(argv[1]).resolve()), check_existing=False)
+        print('DOTS_SAMPLE', argv[1], flush=True)
+        return 0
+    if argv and argv[0] == '--bones':
+        return bones(argv[1])
     path = Path(argv[0])
     cfg = json.loads(path.read_text(encoding='utf-8'))
     measure(cfg)

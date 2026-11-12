@@ -104,7 +104,10 @@ def run_blender(exe, script, args, timeout, done_tag, echo=print, show=('DOTS_WA
         process.kill()
         raise Skipped('Blender exceeded %d s and was stopped' % timeout)
     if process.returncode != 0 or not any(l.startswith(done_tag) for l in lines):
-        why = next((l for l in reversed(lines) if 'Error' in l), 'exit %s' % process.returncode)
+        errors = [l for l in lines if 'Error' in l]
+        why = next((l for l in reversed(errors) if re.match(r'\w+Error: ', l)), errors[-1] if errors else
+                   'exit %s' % process.returncode)
+        why = re.sub(r'^RuntimeError: ', '', why)
         raise Skipped('Blender failed: %s' % why[:200])
     return round(time.time() - began, 1), lines
 
@@ -297,7 +300,7 @@ def cmd_selftest(args, echo=print):
     try:
         exe = find_blender(args.blender)
         out.mkdir(parents=True, exist_ok=True)
-        seconds, lines = run_blender(exe, MEASURER, ['--selftest', out], args.timeout, 'DOTS_SELFTEST', echo,
+        seconds, lines = run_blender(exe, MEASURER, ['--selftest', out, '--rig', args.rig], args.timeout, 'DOTS_SELFTEST', echo,
                                      show=('DOTS_SELFTEST',))
     except Skipped as why:
         echo(skipped(str(why))[0])
@@ -307,9 +310,37 @@ def cmd_selftest(args, echo=print):
     return 0 if ok else 1
 
 
+def describe_bones(path, arms):
+    if not arms:
+        return ['dots: FAIL bones %s: no armature in the file' % Path(path).name]
+    good = any(a['usable'] for a in arms)
+    lines = ['dots: %s bones %s: %d armature(s)' % ('PASS' if good else 'FAIL', Path(path).name, len(arms))]
+    for a in arms:
+        lines.append('  armature %s: %d bones, preset %s (%d matched; scores %s) %s' % (
+            a['armature'], len(a['bones']), a['preset'], len(a['map']),
+            ', '.join('%s %d' % kv for kv in a['scores'].items()),
+            'usable' if a['usable'] else 'NO BONE MAP: add "boneMap": {canonical: rig bone} to the character'))
+        lines.append('  map: ' + ', '.join('%s=%s' % kv for kv in a['map'].items()))
+        lines.append('  unmatched: ' + (', '.join(a['unmatched']) or 'none'))
+        lines.append('  skinned meshes: ' + (', '.join(a['skinnedMeshes']) or 'none'))
+    return lines
+
+
 def cmd_bones(args, echo=print):
-    echo(skipped('bones: not built yet')[0])
-    return 2
+    path = Path(args.file).resolve()
+    try:
+        if not path.is_file():
+            raise Skipped('no file %s' % path)
+        exe = find_blender(args.blender)
+        _, lines = run_blender(exe, MEASURER, ['--bones', path], args.timeout, 'DOTS_BONES', echo)
+    except Skipped as why:
+        echo(skipped(str(why))[0])
+        return 2
+    arms = json.loads(next(l for l in lines if l.startswith('DOTS_BONES')).split(' ', 1)[1])
+    out = describe_bones(path, arms)
+    for line in out:
+        echo(line)
+    return 0 if out[0].startswith('dots: PASS') else 1
 
 
 def cmd_sheet(args, echo=print):
@@ -326,6 +357,8 @@ def main(argv=None, echo=print):
         p.add_argument('--timeout', type=float, default=TIMEOUT_S)
         if name == 'selftest':
             p.add_argument('--out')
+            p.add_argument('--rig', default='plain', choices=('plain', 'mixamo', 'unity', 'unknown'),
+                           help='bone names of the synthetic character (bone map test)')
         if name == 'bones':
             p.add_argument('file')
         if name == 'measure':
