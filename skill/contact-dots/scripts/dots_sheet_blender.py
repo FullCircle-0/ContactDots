@@ -38,7 +38,7 @@ COLOURS = {'pass': (1, 1, 0, 1), 'fail': (1, 0, 1, 1), 'object': (0.65, 0.35, 0.
 BODY = [(0.86, 0.68, 0.56, 1), (0.6, 0.66, 0.8, 1), (0.74, 0.8, 0.6, 1), (0.82, 0.66, 0.78, 1)]   # muted, per character
 PROP = [(0.5, 0.64, 0.86, 1), (0.66, 0.6, 0.5, 1), (0.6, 0.78, 0.7, 1), (0.78, 0.74, 0.5, 1)]    # per prop object
 AXES = [(1, 0.15, 0.15, 1), (0.2, 1, 0.2, 1), (0.25, 0.5, 1, 1)]   # X Y Z: the only near-pure R/G/B on the sheet
-LIFT = 0.15             # metres toward the camera for marks drawn in front (ortho: same spot on screen)
+MARK_DEPTH = 0.6        # marks drawn in front sit this far before the camera (ortho: same spot on screen)
 TRIAD_MM, TRIAD_PX = 30, 40
 UP = Vector((0, 0, 1))
 
@@ -65,7 +65,7 @@ def flat(name, rgba):
     for n in list(nt.nodes):
         nt.nodes.remove(n)
     lw = nt.nodes.new('ShaderNodeLayerWeight'); lw.inputs[0].default_value = 0.5
-    mul = nt.nodes.new('ShaderNodeMath'); mul.operation = 'MULTIPLY'; mul.inputs[1].default_value = 0.45
+    mul = nt.nodes.new('ShaderNodeMath'); mul.operation = 'MULTIPLY'; mul.inputs[1].default_value = 0.6
     sub = nt.nodes.new('ShaderNodeMath'); sub.operation = 'SUBTRACT'; sub.inputs[0].default_value = 1.0
     e = nt.nodes.new('ShaderNodeEmission'); e.inputs[0].default_value = [to_linear(c) for c in rgba[:3]] + [1]
     o = nt.nodes.new('ShaderNodeOutputMaterial')
@@ -93,19 +93,6 @@ def translucent(name, rgba, alpha=0.4):
     o = nt.nodes.new('ShaderNodeOutputMaterial')
     nt.links.new(t.outputs[0], mix.inputs[1]); nt.links.new(e.outputs[0], mix.inputs[2])
     nt.links.new(mix.outputs[0], o.inputs[0])
-    for attr, value in (('surface_render_method', 'BLENDED'), ('blend_method', 'BLEND'), ('use_backface_culling', False)):
-        if hasattr(m, attr):
-            try:
-                setattr(m, attr, value)
-            except (TypeError, ValueError):
-                pass
-    return m
-
-
-def see_through(name, rgba, alpha=0.5):
-    m = bpy.data.materials.new(name); m.use_nodes = True
-    bsdf = m.node_tree.nodes['Principled BSDF']
-    bsdf.inputs['Base Color'].default_value = rgba; bsdf.inputs['Alpha'].default_value = alpha
     for attr, value in (('surface_render_method', 'BLENDED'), ('blend_method', 'BLEND'), ('use_backface_culling', False)):
         if hasattr(m, attr):
             try:
@@ -236,14 +223,16 @@ class Marks:
         o = self._obj('disc', lambda bm: bmesh.ops.create_circle(bm, cap_ends=True, segments=32, radius=radius), mat)
         o.location = c + normal * 0.0004; o.rotation_euler = normal.to_track_quat('Z', 'Y').to_euler()
 
-    def triad(self, origin, axes, length, r, lift, dark):
+    def triad(self, origin, axes, length, r, lift, rim):
         for d, rgba in zip(axes, AXES):
-            self.rod(origin + lift * 0.9, origin + d * length + lift * 0.9, r * 1.7, dark, name='rim')   # dark outline behind
-            self.arrow(origin + lift, d, length, r, emission('Axis_%d_%d_%d' % tuple(int(c * 100) for c in rgba[:3]), rgba))
+            self.arrow(origin + lift, d, length, r, emission('Axis_%d_%d_%d' % tuple(int(c * 100) for c in rgba[:3]), rgba), rim)
         self.sphere(origin + lift, min(r * 1.2, length * 0.15), emission('TriadOrigin', (0.95, 0.95, 0.95, 1)))
 
-    def arrow(self, p, d, length, r, mat):
+    def arrow(self, p, d, length, r, mat, rim=None):
         tip = p + d * length; neck = p + d * (length * 0.78)
+        if rim is not None:                                       # (dark material, offset away from the camera)
+            dark, back = rim
+            self.rod(p + back, neck + back, r * 1.8, dark, name='rim'); self.rod(neck + back, tip + back, r * 4.2, dark, r2=0.0, name='rim')
         self.rod(p, neck, r, mat, name='arrow'); self.rod(neck, tip, r * 3.2, mat, r2=0.0, name='head')
 
 
@@ -296,7 +285,13 @@ def view_of(tile):
     if side.length < 1e-6:
         side = Vector((1, -1, 0))
     side.normalize()
-    return (side * math.cos(math.radians(15)) - UP * math.sin(math.radians(15))).normalized()
+    look = (side * math.cos(math.radians(15)) - UP * math.sin(math.radians(15))).normalized()
+    if 'n' in tile:                                   # a disc on the surface: look at it from 45 deg, not edge-on
+        n = Vector(tile['n'])
+        n = n - look * look.dot(n)
+        if n.length > 1e-3:
+            look = (look - n.normalized()).normalized()
+    return look
 
 
 def arrow_length(tile):
@@ -397,47 +392,56 @@ def main(job_path):
     for tile in job['tiles']:
         marks.clear()
         scene.frame_set(int(tile['frame']))
+        arrows = 'da' in tile and 'db' in tile
+        p, q = Vector(tile['p']), Vector(tile['q'])
+        hit = None if arrows else surface_at(q, p, colour)
+        tile.pop('n', None)
+        if hit:
+            n = hit[1]
+            if (p - q).length > 1e-4 and n.dot(p - q) < 0:
+                n = -n                                        # out of the surface, toward the measured dot
+            tile['n'] = list(n)
         scale = frame_tile(cam, text, back, tile)
         r = scale * 0.016
-        arrows = 'da' in tile and 'db' in tile
+        look = view_of(tile); base = look.dot((p + q) / 2 - cam.location)
+
+        def lift(depth):                                      # moves a mark to `depth` metres before the camera
+            return -look * (base - depth)
+        dark = emission('Rim', (0.05, 0.05, 0.06, 1)); rim = (dark, look * 0.02)
         for name, pos in (job.get('dotsAt', {}).get(str(tile['frame'])) or {}).items():
             role = name.split('.')[0]
             rgba = ROLE_COLOURS[roles[role] % len(ROLE_COLOURS)] if role in roles else COLOURS['object']
             marks.sphere(Vector(pos), r * (0.3 if arrows else 0.75), emission('Dot_%s' % (role if role in roles else 'object'), rgba))
         verdict = emission('Verdict_' + ('pass' if tile['ok'] else 'fail'), COLOURS['pass' if tile['ok'] else 'fail'])
-        p, q = Vector(tile['p']), Vector(tile['q'])
-        lift = -view_of(tile) * LIFT        # measured marks sit toward the camera, in front of the opaque meshes;
-        if not arrows:                      # the camera is ortho, so they keep their spot on screen
-            hit = surface_at(q, p, colour)
-            if hit:
-                obj, n = hit; tint = complement(colour[obj]); edge = emission('DiscEdge_' + obj.name, tint)
-                if n.dot(-view_of(tile)) < 0:
-                    n = -n
-                marks.disc(q, n, 0.0125, translucent('Disc_' + obj.name, tint))
-                marks.ring(q + lift * 0.8, n, 0.0125, r * 0.25, edge)
-                marks.arrow(q + lift * 0.8, n, 0.025, r * 0.35, edge)
+        if hit:                             # the disc stays on the real surface (depth-tested); edge and normal in front
+            obj = hit[0]; n = Vector(tile['n']); tint = complement(colour[obj]); edge = emission('DiscEdge_' + obj.name, tint)
+            marks.disc(q, n, 0.0125, translucent('Disc_' + obj.name, tint))
+            marks.ring(q + lift(MARK_DEPTH + 0.3), n, 0.0125, r * 0.3, edge)
+            marks.arrow(q + lift(MARK_DEPTH + 0.3), n, 0.025, r * 0.4, edge, rim)
         arm_len = max(TRIAD_MM / 1000.0, TRIAD_PX / TILE * scale)
         if arm_len <= 3 * TRIAD_MM / 1000.0:
-            rim = emission('Rim', (0.05, 0.05, 0.06, 1))
             for ch in chars:
                 for _name, origin, x, y, z in frames_of(ch):
-                    if on_screen(cam, scale, origin):
-                        marks.triad(origin, (x, y, z), arm_len, r * 0.45, lift * 0.95, rim)
-        p, q = p + lift, q + lift
+                    near_p = (origin - p) - look * look.dot(origin - p)
+                    if on_screen(cam, scale, origin) and near_p.length > 0.6 * arm_len:   # never on top of the contact
+                        marks.triad(origin, (x, y, z), arm_len, r * 0.45, lift(MARK_DEPTH + 0.15), rim)
+        p, q = p + lift(MARK_DEPTH), q + lift(MARK_DEPTH)
         if arrows:
             length = arrow_length(tile)
             pa, pb = arrow_bases(tile)
-            pa, pb = pa + lift, pb + lift
-            marks.arrow(pa, Vector(tile['da']).normalized(), length, r * 0.7, emission('ArrowA', COLOURS['arrowA']))
-            marks.arrow(pb, Vector(tile['db']).normalized(), length, r * 0.7, verdict)
+            pa, pb = pa + lift(MARK_DEPTH), pb + lift(MARK_DEPTH)
+            marks.arrow(pa, Vector(tile['da']).normalized(), length, r * 0.7, emission('ArrowA', COLOURS['arrowA']), rim)
+            marks.arrow(pb, Vector(tile['db']).normalized(), length, r * 0.7, verdict, rim)
             marks.sphere(pa, r * 1.3, emission('ArrowA', COLOURS['arrowA'])); marks.sphere(pb, r * 1.3, verdict)
             if (pb - q).length > 1e-6:
                 marks.rod(q, pb, r * 0.25, verdict)                # thin tie back to the measured point
         else:
             marks.sphere(p, r * 1.7, verdict); marks.sphere(q, r * 1.4, emission('Surface', COLOURS['surface']))
-            marks.rod(p, q, r * 0.45, verdict)
+            marks.rod(p + rim[1], q + rim[1], r * 0.8, dark, name='rim'); marks.rod(p, q, r * 0.45, verdict)
+            marks.sphere(p + rim[1], r * 2.0, dark)
             if (p - q).length < r * 4:
-                marks.ring((p + q) / 2, view_of(tile), r * 4, r * 0.6, verdict)
+                marks.ring((p + q) / 2 + rim[1], look, r * 4, r * 0.95, dark)
+                marks.ring((p + q) / 2, look, r * 4, r * 0.6, verdict)
         path = tiles_dir / ('%s.png' % tile['name'])
         scene.render.filepath = str(path)
         bpy.ops.render.render(write_still=True)
