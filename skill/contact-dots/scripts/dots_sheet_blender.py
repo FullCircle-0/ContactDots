@@ -3,7 +3,7 @@
 
 The job (written by dots.py from a judged dots.json): out (the sheet png), config (the measured config: the scene is
 rebuilt from its files, or from its 'builtin' selftest entry), dotsAt (frame -> dot -> position), roles (character
-order for the dot colours) and tiles [{name, frame, p, q, ok, caption, mm, da, db}] (metres, unit directions).
+order for the dot colours) and tiles [{name, frame, p, q, ok, caption, mm, dot, surface, da, db}] (metres, unit directions).
 
 Per tile: every mesh in one flat colour per character or prop, every dot of that frame coloured per character (custom dots on objects in one
 colour), the measured dot and its surface point larger, the pair line (yellow pass, magenta fail; a ring round a pair too close for a line), for align and range
@@ -33,7 +33,7 @@ COLS = 3
 GAP_PX = 6
 ROLE_COLOURS = [(1.0, 0.33, 0.1, 1), (0.1, 0.8, 0.75, 1), (0.6, 0.9, 0.3, 1), (0.9, 0.5, 0.6, 1)]   # far from yellow
 COLOURS = {'pass': (1, 1, 0, 1), 'fail': (1, 0, 1, 1), 'object': (0.65, 0.35, 0.95, 1), 'surface': (0.95, 0.95, 0.95, 1),
-           'arrowA': (0.6, 0.9, 1.0, 1), 'text': (1, 1, 1, 1)}      # never pure R/G/B
+           'arrowA': (0.6, 0.9, 1.0, 1), 'text': (1, 1, 1, 1), 'floorDisc': (0.8, 0.8, 0.85, 1)}      # never pure R/G/B
 # Palette values are display (sRGB) colours; emission() converts them to linear so the Standard view shows them as written.
 BODY = [(0.86, 0.68, 0.56, 1), (0.6, 0.66, 0.8, 1), (0.74, 0.8, 0.6, 1), (0.82, 0.66, 0.78, 1)]   # muted, per character
 PROP = [(0.5, 0.64, 0.86, 1), (0.66, 0.6, 0.5, 1), (0.6, 0.78, 0.7, 1), (0.78, 0.74, 0.5, 1)]    # per prop object
@@ -132,11 +132,33 @@ def build_scene(cfg):
     return chars, colour
 
 
-def surface_at(q, p, colour):
-    """The mesh under the surface point q (not the one p sits on) and its normal there; None if none within 10 mm."""
+def surface_meshes(surface, dot, colour, chars):
+    """The meshes the measured surface label names ('prop:<name>', '<role>[.<bone>]', 'self[.<bone>]'); None when
+    the label does not say ('nearest', unknown) and the caller has to guess; [] for the floor."""
+    if not surface or surface == 'nearest':
+        return None
+    if surface == 'floor':
+        return []
+    if surface.startswith('prop:'):
+        o = bpy.data.objects.get(surface[5:])
+        return [o] if o in colour else None
+    role = surface.partition('.')[0]
+    if role == 'self':
+        role = (dot or '').partition('.')[0]
+    arms = [c.arm for c in chars if c.role == role]
+    if not arms:
+        every = [o for o in bpy.data.objects if o.type == 'ARMATURE']
+        arms = every if len(every) == 1 else []
+    found = [o for o in colour if any(dots_blender.is_skinned_to(o, a) for a in arms)]
+    return found or None
+
+
+def surface_at(q, p, colour, only=None):
+    """The mesh under the surface point q (of `only` when the label names it, else not the one p sits on) and its
+    normal there; None if none within 10 mm."""
     dg = bpy.context.evaluated_depsgraph_get()
     hits = []
-    for o in colour:
+    for o in (only if only else colour):
         ev = o.evaluated_get(dg); mw = ev.matrix_world; inv = mw.inverted()
         ok_q, loc_q, nor, _ = ev.closest_point_on_mesh(inv @ q)
         ok_p, loc_p, _, _ = ev.closest_point_on_mesh(inv @ p)
@@ -146,7 +168,7 @@ def surface_at(q, p, colour):
         hits.append(((mw @ loc_q - q).length, (mw @ loc_p - p).length if ok_p else 1e9, o, n))
     if not hits:
         return None
-    own_p = min(hits, key=lambda h: h[1])[2] if len(hits) > 1 else None
+    own_p = min(hits, key=lambda h: h[1])[2] if len(hits) > 1 and not only else None
     best = min((h for h in hits if h[2] is not own_p), key=lambda h: h[0], default=None)
     if best is None or best[0] > 0.01:
         return None
@@ -394,7 +416,11 @@ def main(job_path):
         scene.frame_set(int(tile['frame']))
         arrows = 'da' in tile and 'db' in tile
         p, q = Vector(tile['p']), Vector(tile['q'])
-        hit = None if arrows else surface_at(q, p, colour)
+        only = None if arrows else surface_meshes(tile.get('surface'), tile.get('dot'), colour, chars)
+        if only == []:                                        # the floor: no mesh, a disc on the floor plane
+            hit = (None, UP.copy())
+        else:
+            hit = None if arrows else surface_at(q, p, colour, only)
         tile.pop('n', None)
         if hit:
             n = hit[1]                                        # the face normal: out of the surface
@@ -416,8 +442,9 @@ def main(job_path):
             marks.sphere(Vector(pos), r * (0.3 if arrows else 0.75), emission('Dot_%s' % (role if role in roles else 'object'), rgba))
         verdict = emission('Verdict_' + ('pass' if tile['ok'] else 'fail'), COLOURS['pass' if tile['ok'] else 'fail'])
         if hit:                             # the disc stays on the real surface (depth-tested); edge and normal in front
-            obj = hit[0]; n = Vector(tile['n']); tint = complement(colour[obj]); edge = emission('DiscEdge_' + obj.name, tint)
-            marks.disc(q, n, 0.0125, translucent('Disc_' + obj.name, tint))
+            obj = hit[0]; n = Vector(tile['n']); key = obj.name if obj else 'floor'
+            tint = complement(colour[obj]) if obj else COLOURS['floorDisc']; edge = emission('DiscEdge_' + key, tint)
+            marks.disc(q, n, 0.0125, translucent('Disc_' + key, tint))
             marks.ring(q + lift(MARK_DEPTH + 0.3), n, 0.0125, r * 0.3, edge)
             marks.arrow(q + lift(MARK_DEPTH + 0.3), n, 0.025, r * 0.4, edge, rim)
         arm_len = max(TRIAD_MM / 1000.0, TRIAD_PX / TILE * scale)
@@ -425,7 +452,7 @@ def main(job_path):
             for ch in chars:
                 for _name, origin, x, y, z in frames_of(ch):
                     near_p = (origin - p) - look * look.dot(origin - p)
-                    if on_screen(cam, scale, origin, back.scale[1]) and near_p.length > 0.6 * arm_len:   # never on top of the contact
+                    if on_screen(cam, scale, origin, back.scale[1]) and near_p.length > 0.6 * arm_len:   # not on the contact
                         marks.triad(origin, (x, y, z), arm_len, r * 0.45, lift(MARK_DEPTH + 0.15), rim)
         p, q = p + lift(MARK_DEPTH), q + lift(MARK_DEPTH)
         if arrows:

@@ -59,7 +59,7 @@ penetration deeper than `insideMm` (deepest first, at most `closeups`). Each mes
 background, dots coloured per character (custom dots on objects in one colour), the measured dot
 larger, the pair line yellow (pass) or magenta (fail), a ring round a near-zero gap, angle checks
 as two arrows with dark rims. A translucent disc lies on the surface at the measured surface point,
-in the complement of that mesh's colour, with its outline and normal arrow (out of the surface;
+on the surface the check names, in the complement of that mesh's colour (grey on the floor), with its outline and normal arrow (out of the surface;
 on an inside tile the dot is behind it). A disc whose colour is close to
 the mesh behind it is faint: look for the outline. XYZ triads (X red, Y green,
 Z light blue; the only pure R/G/B on the sheet) show the palm, wrist, head and pelvis frames in close

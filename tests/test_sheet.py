@@ -135,3 +135,10 @@ def test_grab_touch_tile_has_triads_and_disc(grab, tile):
 def test_grab_marks_only_where_meant(grab):
     assert count(grab, 'touch-palm-on-bar', AXIS_RGB[0]) < 20       # no triad on top of the contact itself
     assert count(grab, 'align-palm-faces-bar', BAR_DISC_RGB, 8) < 20  # arrows, no disc
+
+
+def test_selftest_discs_on_the_named_surface(sheets):
+    """The disc goes on the surface the check names: the cube (its complement colour), the floor (no mesh: grey)."""
+    folder = sheets['body'][0] / 'dots-sheet-tiles'
+    assert count(folder, 'touch-tip-on-cube', BAR_DISC_RGB, 8) > 300          # the Cube is PROP[0] too
+    assert count(folder, 'touch-tip-on-floor', (204, 204, 217), 8) > 300      # COLOURS['floorDisc']

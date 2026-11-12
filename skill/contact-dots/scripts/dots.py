@@ -541,7 +541,7 @@ def _caption(head, value, limit, ok):
 def sheet_tiles(payload):
     """The close-ups of a judged dots.json: one per declared contact or check (at its verdict frame) and one per
     penetration deeper than the inside limit (worst first, at most `closeups`). Each tile: name, frame, p, q (metres),
-    ok, caption, mm (signed gap) for touch and inside, and da/db (unit directions) for align and range."""
+    ok, caption, mm (signed gap), dot and surface (labels) for touch and inside, and da/db (unit directions) for align and range."""
     v = payload['verdict']; rows = {r['id']: r for r in v['checks']}
     tiles, used = [], set()
 
@@ -559,7 +559,7 @@ def sheet_tiles(payload):
         g = c['gaps'][str(r['frame'])]
         add('touch-' + c['id'], r['frame'], r['ok'], _caption(
             'touch %s  f%d  %s on %s' % (c['id'], r['frame'], g['dot'], g['surface']), 'gap %+.1f mm' % g['mm'],
-            c.get('limit', ''), r['ok']), g['p'], g['q'], mm=g['mm'])
+            c.get('limit', ''), r['ok']), g['p'], g['q'], mm=g['mm'], dot=g['dot'], surface=g['surface'])
     for c in payload.get('checks', []):
         r = rows.get(c['id'])
         if not r or 'frame' not in r:
@@ -576,7 +576,7 @@ def sheet_tiles(payload):
     for pen in [x for x in payload.get('penetrations', []) if x['mm'] < -inside][:cap]:
         add('inside-%s-f%d' % (pen['dot'], pen['frame']), pen['frame'], False, _caption(
             'inside  f%d  %s in %s' % (pen['frame'], pen['dot'], pen['surface']), 'gap %+.1f mm' % pen['mm'],
-            'inside <= %g mm' % inside, False), pen['p'], pen['q'], mm=pen['mm'])
+            'inside <= %g mm' % inside, False), pen['p'], pen['q'], mm=pen['mm'], dot=pen['dot'], surface=pen['surface'])
     return tiles
 
 
