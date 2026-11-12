@@ -20,7 +20,7 @@ penetration is deeper than `insideMm`. With no checks: a line of observed contac
 | Key | Content |
 |-----|---------|
 | `verdict` | `status` (PASS/FAIL), `limits`, `checks` (the summary rows: id, kind, what, ok, text, frame), `penetrationsOverLimit` |
-| `contacts` | touch entries: `gaps` {frame: {mm, dot, surface, p, q}}, `worstMm`/`worstFrame` (most off at its frames), `deepestMm`/`deepestFrame`, `ok`, `limit` |
+| `contacts` | touch entries: `gaps` {frame: {mm, dot, surface, p, q, parity when ray-tested}}, `worstMm`/`worstFrame` (most off at its frames), `deepestMm`/`deepestFrame`, `ok`, `limit` |
 | `checks` | other kinds: `values` {frame: {v, p, q, ...}}, `unit`, `worst`/`worstFrame`, `least`/`leastFrame`, `ok`, `limit`. `rest` adds `min` and per-dot `gaps`; `align`/`range` add the directions `da`, `db` |
 | `penetrations` | every dot inside any surface on any frame: {dot, surface, group, mm, frame}, deepest first |
 | `observed` | dots within `observeMm` of a surface (shown when no checks are declared) |
@@ -40,6 +40,10 @@ the sheet.
   +`offMm`; small negatives (skin pressing in) are fine down to -`insideMm`.
 - Floating contact: touch FAIL with a positive worst gap.
 - Sinking: a penetration row, or a touch with a deepest gap below -`insideMm`.
+- Deep dots: past `signRangeM` a dot behind the nearest face is inside only if most of six rays
+  cross its whole closed surface an odd number of times; `parity` holds those votes (0-6, 4+ =
+  inside). An open surface (a lone sheet, a mesh with holes) can never read deep inside, so a
+  large positive gap with `parity` 0-3 on such a surface is worth a look on the sheet.
 - `hold`: movement since the check's first frame in its frame of reference; a steady climb
   means sliding, a jump means a pop.
 - `range` with `axis`: signed; a value below `min` on an elbow or knee is hyperextension.

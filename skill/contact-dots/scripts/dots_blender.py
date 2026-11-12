@@ -52,6 +52,11 @@ LIMBS = {'forearm': ('ForeArm', 'Hand'), 'upperarm': ('Arm', 'ForeArm'), 'thigh'
 LIMB_T = (0.25, 0.5, 0.75)
 PALM_SIGN = {'R': 1.0, 'L': -1.0}          # (index-pinky) x (middle-wrist) points out of the right palm, the back of the left
 SIGN_RANGE = 0.03
+# Ray-parity test for dots behind a face past SIGN_RANGE: six skewed rays (skewed so they do not run along mesh edges);
+# a dot is inside when most of them (4+) cross the surface an odd number of times. A closed surface gives 6, a lone open
+# sheet 3 (only the rays heading toward it cross), so an open prop does not fake a deep inside.
+PARITY_DIRS = ((1, 0.13, 0.07), (-1, -0.11, 0.05), (0.09, 1, -0.12), (-0.06, -1, 0.1), (0.08, -0.14, 1), (-0.12, 0.1, -1))
+PARITY_INSIDE = 4
 OBSERVE_MM = 30.0
 SNAPPED = ('palm', 'heel', 'front', 'back')
 
@@ -72,13 +77,42 @@ def nearest(trees, p):
     return best
 
 
-def signed(hit, p, sign_range=SIGN_RANGE):
-    """Signed distance (m): negative when p is behind the nearest face. Only trusted near the surface (open regions
-    give false insides far away)."""
+def parity(trees, p, max_dist=10.0):
+    """How many of the PARITY_DIRS rays from p cross the surface an odd number of times (0..6): odd = inside."""
+    votes = 0
+    for dx, dy, dz in PARITY_DIRS:
+        direction = Vector((dx, dy, dz)).normalized()
+        hits = 0
+        for _, tree in trees:
+            origin = Vector(p)
+            for _ in range(256):
+                loc, _, _, dist = tree.ray_cast(origin, direction, max_dist)
+                if loc is None:
+                    break
+                hits += 1
+                origin = loc + direction * 1e-6
+        votes += hits % 2
+    return votes
+
+
+def signed(hit, p, sign_range=SIGN_RANGE, trees=None):
+    """Signed distance (m): negative when p is inside. Near the surface (< sign_range) the nearest face's side decides.
+    Past sign_range the face side alone is not trusted (open regions fake insides), so a dot behind the face is inside
+    only when most (PARITY_INSIDE) of the parity rays against `trees` (a list, or a function giving one) cross an odd
+    number of times; without trees it reads unsigned (positive). Returns (signed distance, parity votes or None when the
+    parity test did not run), or (None, None) without a hit."""
     if hit is None:
-        return None
+        return None, None
     loc, nrm, _, d = hit
-    return -d if (d < sign_range and (p - loc).dot(nrm) < 0) else d
+    if (p - loc).dot(nrm) >= 0:
+        return d, None
+    if d < sign_range:
+        return -d, None
+    trees = trees() if callable(trees) else trees
+    if not trees:
+        return d, None
+    votes = parity(trees, p)
+    return (-d if votes >= PARITY_INSIDE else d), votes
 
 
 def ray(trees, origin, direction, max_dist):
@@ -92,6 +126,13 @@ def ray(trees, origin, direction, max_dist):
 
 def v3(p):
     return [round(float(x), 5) for x in p]
+
+
+def voted(row, votes):
+    """A gap row, with 'parity' (odd-ray votes of 6) when the sign past signRangeM came from the ray-parity test."""
+    if votes is not None:
+        row['parity'] = votes
+    return row
 
 
 # ---------------------------------------------------------------- characters
@@ -470,12 +511,13 @@ class CustomDot:
             p = Vector(p.tolist())
             if trees == 'floor':
                 g = (p.z - S.floor_z) * 1000.0
-                hit = (g, 'floor', Vector((p.x, p.y, S.floor_z)), p)
+                hit = (g, 'floor', Vector((p.x, p.y, S.floor_z)), p, None)
             else:
                 h = nearest(trees, p)
                 if h is None:
                     continue
-                hit = (signed(h, p, S.sign_range) * 1000.0, h[2], h[0], p)
+                d, votes = signed(h, p, S.sign_range, lambda: S.closed(self.name, h[2]))
+                hit = (d * 1000.0, h[2], h[0], p, votes)
             if best is None or hit[0] < best[0]:
                 best = hit
         return best
@@ -559,18 +601,31 @@ class Scene:
         return out
 
     def gap(self, full, trees):
-        """(gap mm, surface label, nearest surface point, dot point) of one dot against one surface group, or None."""
+        """(gap mm, surface label, nearest surface point, dot point, parity votes or None) of one dot against one surface
+        group, or None."""
         p = self.dot_pos[full]
         d = self.custom.get(full)
         if d is not None and d.at == 'nearest' and d.verts is not None:
             hit = d.nearest_to(self, trees)
-            return None if hit is None else (hit[0] - self.skin[full], hit[1], hit[2], hit[3])
+            return None if hit is None else (hit[0] - self.skin[full], hit[1], hit[2], hit[3], hit[4])
         if trees == 'floor':
-            return (p.z - self.floor_z) * 1000.0 - self.skin[full], 'floor', Vector((p.x, p.y, self.floor_z)), p
+            return (p.z - self.floor_z) * 1000.0 - self.skin[full], 'floor', Vector((p.x, p.y, self.floor_z)), p, None
         hit = nearest(trees, p)
         if hit is None:
             return None
-        return signed(hit, p, self.sign_range) * 1000.0 - self.skin[full], hit[2], hit[0], p
+        dist, votes = signed(hit, p, self.sign_range, lambda: self.closed(full, hit[2]))
+        return dist * 1000.0 - self.skin[full], hit[2], hit[0], p, votes
+
+    def closed(self, full, label):
+        """The most closed surface a hit belongs to, for the parity test: a prop, or the hit character's whole body (minus
+        the dot's own chain on its own body), even when the check names one bone (a bone's region alone is an open tube)."""
+        if label.startswith('prop:'):
+            return [t for t in self.prop_list if t[0] == label]
+        who = label.split('.')[0]
+        c = self.chars.get(who)
+        if c is None:
+            return []
+        return c.region_trees(exclude=self.excl.get(full, ()) if who == self.role_of(full) else ())
 
     def surface(self, b, full):
         """Trees for a surface spec, seen from dot `full`."""
@@ -780,11 +835,11 @@ def measure(cfg, chars=None, props=None):
                 g = S.gap(full, trees)
                 if g is None:
                     continue
-                mm, label, q, p = g
+                mm, label, q, p, votes = g
                 key = (full, gname)
                 if mm < -PEN_EPS_MM and (key not in pen or mm < pen[key]['mm']):
-                    pen[key] = {'dot': full, 'surface': label, 'group': gname, 'mm': round(mm, 2), 'frame': f,
-                                'p': v3(p), 'q': v3(q)}
+                    pen[key] = voted({'dot': full, 'surface': label, 'group': gname, 'mm': round(mm, 2), 'frame': f,
+                                      'p': v3(p), 'q': v3(q)}, votes)
                 if mm <= observe and (key not in seen or mm < seen[key]['mm']):
                     seen[key] = {'dot': full, 'surface': label, 'mm': round(mm, 2), 'frame': f}
         for c in contacts:
@@ -804,10 +859,10 @@ def measure(cfg, chars=None, props=None):
                 for trees in surfaces:
                     g = S.gap(full, trees)
                     if g and (best is None or g[0] < best[0]):
-                        best = (g[0], full, g[1], g[2], g[3])
+                        best = (g[0], full, g[1], g[2], g[3], g[4])
             if best:
-                per_contact[c['id']][str(f)] = {'mm': round(best[0], 3), 'dot': best[1], 'surface': best[2],
-                                               'p': v3(best[4]), 'q': v3(best[3])}
+                per_contact[c['id']][str(f)] = voted({'mm': round(best[0], 3), 'dot': best[1], 'surface': best[2],
+                                                     'p': v3(best[4]), 'q': v3(best[3])}, best[5])
         for ch in checks:
             if f in ch['frames']:
                 per_check[ch['id']][str(f)] = eval_check(ch, S, hold_ref)
@@ -884,10 +939,11 @@ def write_snapshot(S, snap):
             surf = _near(*every[who], {bone} if bone else None, S.excl[full] if (who == role and not bone) else (), p, crop)
         used[role] |= set(own.tolist()); used[who] |= set(surf.tolist())
         picks.append((role, own, who, surf))
-        mm, label, _, _ = S.gap(full, trees)
+        mm, label, _, _, votes = S.gap(full, trees)
         arrays['dot%d' % i] = np.array(p, dtype=np.float64)
         meta['dots'].append({'name': full, 'snapped': is_snapped(dot), 'toolSkinMm': round(S.skin[full], 3),
-                             'toolGapMm': round(mm, 3), 'toolSurface': label, 'ownRole': role, 'surfRole': who})
+                             'toolGapMm': round(mm, 3), 'toolSurface': label, 'ownRole': role, 'surfRole': who,
+                             'toolParity': votes})
     keep = {r: np.array(sorted(u), dtype=np.int64) for r, u in used.items()}
     for r, k in keep.items():
         arrays['tris_%s' % r] = every[r][0][k].astype(np.float32)
@@ -1167,8 +1223,32 @@ def build_builtin(spec):
     return build_selftest_scene(selftest_rig(spec.get('rig', 'plain')))
 
 
+def parity_selftest():
+    """signed() past signRange on bare geometry: a dot centre 40 mm inside a closed 20 cm cube is inside (all 6 rays odd);
+    the same 40 mm behind a lone open sheet is not (under PARITY_INSIDE votes); 20 mm inside, within signRange, needs no
+    rays. Within 0.1 mm."""
+    import bmesh
+    bm = bmesh.new()
+    bmesh.ops.create_cube(bm, size=0.2)
+    cube = [('cube', BVHTree.FromBMesh(bm))]
+    bm.free()
+    sheet = [('sheet', bvh_from([(-0.5, -0.5, 0.0), (0.5, -0.5, 0.0), (0.5, 0.5, 0.0), (-0.5, 0.5, 0.0)], [(0, 1, 2, 3)]))]
+    ok, rows = True, []
+    for name, trees, p, want, inside in (('cube 40 mm inside', cube, Vector((0.01, -0.02, 0.06)), -40.0, True),
+                                         ('open sheet 40 mm behind', sheet, Vector((0.01, -0.02, -0.04)), 40.0, False),
+                                         ('cube 20 mm inside', cube, Vector((0.01, -0.02, 0.08)), -20.0, None)):
+        d, votes = signed(nearest(trees, p), p, SIGN_RANGE, trees)
+        got = d * 1000.0
+        good = abs(got - want) <= 0.1 and (votes is None if inside is None else (votes >= PARITY_INSIDE) == inside)
+        ok &= good
+        rows.append('parity %s: want %+6.2f got %+7.3f votes %s %s' % (name, want, got, votes, 'ok' if good else 'OFF'))
+    return ok, rows
+
+
 def selftest(out, rig='plain', bone_map=None):
     ok_r, rows_r = rigid_selftest(Path(out) / 'rigid')
+    ok_p, rows_p = parity_selftest()
+    ok_r &= ok_p; rows_r = list(rows_r) + rows_p
     arm, body, cube = build_selftest_scene(selftest_rig(rig))
     cfg = dict(selftest_config(out), builtin={'scene': 'body', 'rig': rig})
     chars = [Character('rig', [arm, body], bone_map=bone_map)]

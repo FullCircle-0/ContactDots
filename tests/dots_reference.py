@@ -58,13 +58,20 @@ def nearest(p, tris):
     return float(d[i]), q[i], i
 
 
-def signed(p, tris, sign_range):
+def signed(p, tris, sign_range, parity=None):
+    """Past sign_range a dot behind the face is inside only by the tool's ray-parity votes (`parity`, 0..6, >= 4 = inside):
+    the snapshot holds only the triangles near the dots, an open crop that cannot be parity-tested here. The parity test
+    itself is checked by the measurer's selftest on a closed cube and an open sheet."""
     d, q, i = nearest(p, tris)
     if q is None:
         return d
     t = tris[i]
     n = np.cross(t[1] - t[0], t[2] - t[0])
-    return -d if (d < sign_range and np.dot(p - q, n) < 0) else d
+    if np.dot(p - q, n) >= 0:
+        return d
+    if d < sign_range:
+        return -d
+    return -d if (parity is not None and parity >= 4) else d
 
 
 def sample_gaps(npz_path):
@@ -81,6 +88,6 @@ def sample_gaps(npz_path):
         own = tris[dot['ownRole']][z['own%d' % i]]
         surf = tris[dot['surfRole']][z['surf%d' % i]]
         skin = 0.0 if dot['snapped'] else nearest(p, own)[0] * 1000.0
-        gap = signed(p, surf, sign_range) * 1000.0 - skin
+        gap = signed(p, surf, sign_range, dot.get('toolParity')) * 1000.0 - skin
         rows.append((dot['name'], gap, dot['toolGapMm'], skin, dot['toolSkinMm']))
     return meta, rows

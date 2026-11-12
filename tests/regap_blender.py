@@ -34,7 +34,10 @@ def regap(path):
         hit = D.nearest(own, p)
         skin = 0.0 if dot['snapped'] or hit is None else hit[3] * 1000.0
         s = D.nearest(surf, p)
-        gap = float('inf') if s is None else D.signed(s, p, sign_range) * 1000.0 - skin
+        d = None if s is None else D.signed(s, p, sign_range)[0]     # the crop is open: no parity test here
+        if d is not None and (dot.get('toolParity') or 0) >= D.PARITY_INSIDE:
+            d = -abs(d)                                                 # the tool's votes say inside
+        gap = float('inf') if d is None else d * 1000.0 - skin
         rows.append([dot['name'], gap, skin])
     return rows
 
