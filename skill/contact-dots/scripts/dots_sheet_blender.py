@@ -276,24 +276,25 @@ def main(job_path):
         for name, pos in (job.get('dotsAt', {}).get(str(tile['frame'])) or {}).items():
             role = name.split('.')[0]
             rgba = ROLE_COLOURS[roles[role] % len(ROLE_COLOURS)] if role in roles else COLOURS['object']
-            marks.sphere(Vector(pos), r * (0.3 if arrows else 0.5), emission('Dot_%s' % (role if role in roles else 'object'), rgba))
+            marks.sphere(Vector(pos), r * (0.3 if arrows else 0.75), emission('Dot_%s' % (role if role in roles else 'object'), rgba))
         verdict = emission('Verdict_' + ('pass' if tile['ok'] else 'fail'), COLOURS['pass' if tile['ok'] else 'fail'])
         p, q = Vector(tile['p']), Vector(tile['q'])
+        lift = -view_of(tile) * 0.15        # measured marks sit toward the camera, in front of the see-through meshes;
+        p, q = p + lift, q + lift           # the camera is ortho, so they keep their spot on screen
         if arrows:
             length = arrow_length(tile)
             pa, pb = arrow_bases(tile)
-            lift = -view_of(tile) * 0.15          # toward the camera: drawn in front of the body; ortho, so same screen spot
-            pa, pb, q = pa + lift, pb + lift, q + lift
+            pa, pb = pa + lift, pb + lift
             marks.arrow(pa, Vector(tile['da']).normalized(), length, r * 0.7, emission('ArrowA', COLOURS['arrowA']))
             marks.arrow(pb, Vector(tile['db']).normalized(), length, r * 0.7, verdict)
             marks.sphere(pa, r * 1.3, emission('ArrowA', COLOURS['arrowA'])); marks.sphere(pb, r * 1.3, verdict)
             if (pb - q).length > 1e-6:
                 marks.rod(q, pb, r * 0.25, verdict)                # thin tie back to the measured point
         else:
-            marks.sphere(p, r * 1.7, verdict); marks.sphere(q, r * 1.1, emission('Surface', COLOURS['surface']))
+            marks.sphere(p, r * 1.7, verdict); marks.sphere(q, r * 1.4, emission('Surface', COLOURS['surface']))
             marks.rod(p, q, r * 0.45, verdict)
             if (p - q).length < r * 4:
-                marks.ring((p + q) / 2, view_of(tile), r * 4, r * 0.35, verdict)
+                marks.ring((p + q) / 2, view_of(tile), r * 4, r * 0.6, verdict)
         path = tiles_dir / ('%s.png' % tile['name'])
         scene.render.filepath = str(path)
         bpy.ops.render.render(write_still=True)
