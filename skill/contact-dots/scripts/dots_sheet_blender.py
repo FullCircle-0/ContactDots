@@ -28,7 +28,7 @@ import dots_blender  # noqa: E402
 TILE = 480
 COLS = 3
 GAP_PX = 6
-ROLE_COLOURS = [(1.0, 0.55, 0.1, 1), (0.1, 0.8, 0.75, 1), (0.45, 0.65, 1.0, 1), (0.6, 0.9, 0.3, 1)]
+ROLE_COLOURS = [(1.0, 0.4, 0.05, 1), (0.1, 0.8, 0.75, 1), (0.6, 0.9, 0.3, 1), (0.9, 0.5, 0.6, 1)]   # far from yellow
 COLOURS = {'pass': (1, 1, 0, 1), 'fail': (1, 0, 1, 1), 'object': (0.65, 0.35, 0.95, 1), 'surface': (0.95, 0.95, 0.95, 1),
            'arrowA': (0.45, 0.65, 1.0, 1), 'text': (1, 1, 1, 1)}      # never pure R/G/B
 SKIN = [(0.6, 0.62, 0.66, 1), (0.8, 0.78, 0.75, 1)]
@@ -111,7 +111,7 @@ class Marks:
 def camera(scene):
     data = bpy.data.cameras.new('SheetCam'); data.type = 'ORTHO'; data.clip_start = 0.001; data.clip_end = 100
     cam = bpy.data.objects.new('SheetCam', data); scene.collection.objects.link(cam); scene.camera = cam
-    curve = bpy.data.curves.new('Caption', type='FONT'); curve.align_x = 'LEFT'; curve.align_y = 'BOTTOM'
+    curve = bpy.data.curves.new('Caption', type='FONT'); curve.align_x = 'LEFT'; curve.align_y = 'TOP'
     text = bpy.data.objects.new('Caption', curve); scene.collection.objects.link(text)
     text.parent = cam; curve.materials.append(emission('Caption', COLOURS['text'], 1.0))
     plate = bpy.data.meshes.new('Plate')
@@ -121,39 +121,67 @@ def camera(scene):
     return cam, text, back
 
 
-def frame_tile(cam, text, back, tile, scale):
-    """Point the camera across the pair (or square onto the arrows); caption along the bottom edge."""
+CAPTION = 0.03          # caption letter height, fraction of the tile
+WRAP = 56               # caption characters per line
+MARGIN = 1.35           # framed marks span at most 1/MARGIN of the free area
+
+
+def wrap(caption):
+    lines = []
+    for line in caption.split('\n'):
+        while len(line) > WRAP:
+            cut = line.rfind(' ', 0, WRAP)
+            cut = cut if cut > 0 else WRAP
+            lines.append(line[:cut]); line = '  ' + line[cut:].strip()
+        lines.append(line)
+    return lines
+
+
+def view_of(tile):
+    """Look square onto the two arrows (align, range), else across the pair, slightly from above."""
     p, q = Vector(tile['p']), Vector(tile['q'])
-    gap = q - p
-    look = None
     if 'da' in tile and 'db' in tile:
         n = Vector(tile['da']).cross(Vector(tile['db']))
         if n.length > 1e-3:
-            look = -n.normalized() if n.dot(UP) > 0 else n.normalized()        # the arrows' plane, seen from above-ish
-    if look is None:
-        side = gap.cross(UP) if gap.length > 1e-4 else Vector((0, 0, 0))
-        if side.length < 1e-6:
-            side = Vector((1, -1, 0))
-        side.normalize()
-        look = (side * math.cos(math.radians(15)) - UP * math.sin(math.radians(15))).normalized()
-    centre = (p + q) / 2
+            return -n.normalized() if n.dot(UP) > 0 else n.normalized()
+    gap = q - p
+    side = gap.cross(UP) if gap.length > 1e-4 else Vector((0, 0, 0))
+    if side.length < 1e-6:
+        side = Vector((1, -1, 0))
+    side.normalize()
+    return (side * math.cos(math.radians(15)) - UP * math.sin(math.radians(15))).normalized()
+
+
+def arrow_length(tile):
+    return max(0.05, (Vector(tile['p']) - Vector(tile['q'])).length * 0.8)
+
+
+def frame_tile(cam, text, back, tile):
+    """Fit p, q and the arrow tips inside the tile above the caption strip. Returns the ortho scale."""
+    look = view_of(tile)
+    rot = look.to_track_quat('-Z', 'Y')
+    right, up = rot @ Vector((1, 0, 0)), rot @ Vector((0, 1, 0))
+    p, q = Vector(tile['p']), Vector(tile['q'])
+    pts = [p, q]
+    if 'da' in tile and 'db' in tile:
+        L = arrow_length(tile)
+        pts += [p + Vector(tile['da']).normalized() * L, q + Vector(tile['db']).normalized() * L]
+    xs = [v.dot(right) for v in pts]; ys = [v.dot(up) for v in pts]
+    w, h = max(xs) - min(xs), max(ys) - min(ys)
+    lines = wrap(tile['caption'])
+    strip = CAPTION * (1.25 * len(lines) + 0.7)                               # fraction of the tile
+    least = 0.3 if 'da' in tile else 0.12
+    scale = max(least, w * MARGIN, h * MARGIN / (1 - strip))
+    cx, cy = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
+    centre = right * cx + up * (cy - scale * strip / 2) + look * look.dot((p + q) / 2)
     cam.data.ortho_scale = scale
     cam.location = centre - look * 3.0
-    cam.rotation_euler = look.to_track_quat('-Z', 'Y').to_euler()
-    lines = tile['caption'].split('\n')
-    size = scale * 0.034
-    text.data.body = tile['caption']; text.data.size = size
-    text.location = (-scale * 0.48, -scale * 0.5 + size * 0.5 + size * 1.2 * (len(lines) - 1), -0.01)
-    h = size * 1.25 * len(lines) + size * 0.6
-    back.scale = (scale, h, 1); back.location = (0, -scale * 0.5 + h / 2, -0.012)
-
-
-def tile_scale(tile, cfg):
-    p, q = Vector(tile['p']), Vector(tile['q'])
-    span = (p - q).length
-    if 'da' in tile:
-        return max(0.25, span * 2.5)
-    return min(1.5, max(0.12, span * 3.0))
+    cam.rotation_euler = rot.to_euler()
+    size = scale * CAPTION; strip_h = scale * strip
+    text.data.body = '\n'.join(lines); text.data.size = size
+    text.location = (-scale * 0.48, -scale * 0.5 + strip_h - size * 0.35, -0.01)
+    back.scale = (scale, strip_h, 1); back.location = (0, -scale * 0.5 + strip_h / 2, -0.012)
+    return scale
 
 
 def compose(paths, out):
@@ -205,23 +233,22 @@ def main(job_path):
     for tile in job['tiles']:
         marks.clear()
         scene.frame_set(int(tile['frame']))
-        scale = tile_scale(tile, cfg)
+        scale = frame_tile(cam, text, back, tile)
         r = scale * 0.012
         for name, pos in (job.get('dotsAt', {}).get(str(tile['frame'])) or {}).items():
             role = name.split('.')[0]
             rgba = ROLE_COLOURS[roles[role] % len(ROLE_COLOURS)] if role in roles else COLOURS['object']
-            marks.sphere(Vector(pos), r, emission('Dot_%s' % (role if role in roles else 'object'), rgba))
+            marks.sphere(Vector(pos), r * 0.7, emission('Dot_%s' % (role if role in roles else 'object'), rgba))
         verdict = emission('Verdict_' + ('pass' if tile['ok'] else 'fail'), COLOURS['pass' if tile['ok'] else 'fail'])
         p, q = Vector(tile['p']), Vector(tile['q'])
         if 'da' in tile and 'db' in tile:
-            length = scale * 0.32
+            length = arrow_length(tile)
             marks.arrow(p, Vector(tile['da']).normalized(), length, r * 0.35, emission('ArrowA', COLOURS['arrowA']))
             marks.arrow(q, Vector(tile['db']).normalized(), length, r * 0.35, verdict)
             marks.sphere(p, r * 1.3, emission('ArrowA', COLOURS['arrowA'])); marks.sphere(q, r * 1.3, verdict)
         else:
             marks.sphere(p, r * 1.7, verdict); marks.sphere(q, r * 1.1, emission('Surface', COLOURS['surface']))
-            marks.rod(p, q, r * 0.3, verdict)
-        frame_tile(cam, text, back, tile, scale)
+            marks.rod(p, q, r * 0.45, verdict)
         path = tiles_dir / ('%s.png' % tile['name'])
         scene.render.filepath = str(path)
         bpy.ops.render.render(write_still=True)
