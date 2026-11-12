@@ -230,6 +230,16 @@ class Character:
             return {n for n in (side + 'UpLeg', side + 'Leg') if self.has(n)}
         return {n for n in (side + 'Foot', side + 'ToeBase', side + 'Toe_End') if self.has(n)}
 
+    def mcp_names(self, s):
+        return ['%sHand%s1' % (SIDES[s], f) for f in FINGERS[1:]]
+
+    def palm(self, s):
+        """(palm centre inside the hand, unit normal out of the palm) for side R or L."""
+        mcp = [self.head(n) for n in self.mcp_names(s)]
+        wrist = self.head(SIDES[s] + 'Hand')
+        c = sum(mcp, Vector()) / 4 * 0.6 + wrist * 0.4
+        return c, (mcp[0] - mcp[3]).cross(mcp[1] - wrist).normalized() * PALM_SIGN[s]
+
     def _need(self, dot, *bones):
         missing = [b for b in bones if not self.has(b)]
         if missing:
@@ -249,12 +259,8 @@ class Character:
                     D['%s.%s.tip' % (s, f.lower())] = self.tail(b3)          # rigs without an end bone
                 if self._need('%s.%s.mid' % (s, f.lower()), b2):
                     D['%s.%s.mid' % (s, f.lower())] = self.head(b2)
-            mcp_names = ['%sHand%s1' % (side, f) for f in FINGERS[1:]]
-            if self._need(s + '.palm', side + 'Hand', *mcp_names):
-                mcp = [self.head(n) for n in mcp_names]
-                wrist = self.head(side + 'Hand')
-                c = sum(mcp, Vector()) / 4 * 0.6 + wrist * 0.4
-                n = (mcp[0] - mcp[3]).cross(mcp[1] - wrist).normalized() * PALM_SIGN[s]
+            if self._need(s + '.palm', side + 'Hand', *self.mcp_names(s)):
+                c, n = self.palm(s)
                 hit = ray(self.region_trees(self.hand_bones(s)), c, n, 0.06)
                 D[s + '.palm'] = hit[0] if hit else c + n * 0.012
             for limb, (a, b) in LIMBS.items():
@@ -348,8 +354,8 @@ def frame_list(spec, chars):
         return list(range(a, b + 1))
     if isinstance(spec, (list, tuple)):
         return sorted({int(f) for f in spec})
-    ranges = [c.arm.animation_data.action.frame_range for c in chars
-              if c.arm.animation_data and c.arm.animation_data.action]
+    animated = [c.arm for c in chars] or list(bpy.context.scene.objects)
+    ranges = [o.animation_data.action.frame_range for o in animated if o.animation_data and o.animation_data.action]
     if ranges:
         return list(range(int(min(r[0] for r in ranges)), int(max(r[1] for r in ranges)) + 1))
     sc = bpy.context.scene
@@ -369,14 +375,128 @@ def prop_trees(props):
     return out
 
 
+AXES = {'x': 0, 'y': 1, 'z': 2}
+
+
+def axis_of(matrix, axis):
+    """Unit world vector of a local axis 'x', '-y', ... of a 3x3/4x4 matrix."""
+    axis = str(axis or 'y').lower()
+    if axis.lstrip('+-') not in AXES:
+        raise RuntimeError('axis %r: use x, y, z, -x, -y or -z' % axis)
+    v = matrix.to_3x3().col[AXES[axis.lstrip('+-')]].normalized()
+    return -v if axis.startswith('-') else v
+
+
+def find_object(name):
+    o = bpy.data.objects.get(name)
+    if o is None:
+        raise RuntimeError('no object %r in the scene (objects: %s)' % (name, sorted(x.name for x in bpy.data.objects)[:30]))
+    return o
+
+
+def evaluated_coords(obj):
+    """World vertex positions of an object's evaluated mesh, (N,3) numpy."""
+    dg = bpy.context.evaluated_depsgraph_get()
+    ev = obj.evaluated_get(dg); me = ev.to_mesh()
+    try:
+        co = np.empty(len(me.vertices) * 3, np.float64); me.vertices.foreach_get('co', co)
+        m = np.array(ev.matrix_world, dtype=np.float64)
+    finally:
+        ev.to_mesh_clear()
+    return co.reshape(-1, 3) @ m[:3, :3].T + m[:3, 3]
+
+
+class CustomDot:
+    """A dot on anything (B6a): a bone + offset, an object + local point, or a mesh region (vertex group, or the
+    vertices a skinned prop's bone dominates) taken at its centre or (at: nearest) at its point nearest the surface."""
+
+    def __init__(self, spec, chars):
+        self.name = spec['name']; self.spec = spec
+        self.penetration = spec.get('penetration', True)
+        self.at = spec.get('at', 'centre')
+        self.obj = self.arm = self.pbone = self.char = self.canon = None
+        self.verts = None
+        if spec.get('object'):
+            self.obj = find_object(spec['object'])
+            group = spec.get('group'); region = spec.get('regionBone')
+            if group or region:
+                if self.obj.type != 'MESH':
+                    raise RuntimeError('dot %s: %s is not a mesh' % (self.name, self.obj.name))
+                names = {g.index: g.name for g in self.obj.vertex_groups}
+                pick = []
+                for v in self.obj.data.vertices:
+                    ws = {names[g.group]: g.weight for g in v.groups}
+                    if group and ws.get(group, 0) >= 0.5:
+                        pick.append(v.index)
+                    elif region and ws and max(ws, key=ws.get) == region:
+                        pick.append(v.index)
+                if not pick:
+                    raise RuntimeError('dot %s: no vertices in %s %r of %s' % (self.name, 'group' if group else 'regionBone',
+                                                                                 group or region, self.obj.name))
+                self.verts = np.array(pick)
+        elif spec.get('bone'):
+            if spec.get('armature'):
+                self.arm = find_object(spec['armature'])
+                if self.arm.type != 'ARMATURE' or spec['bone'] not in self.arm.pose.bones:
+                    raise RuntimeError('dot %s: no bone %r on armature %r' % (self.name, spec['bone'], spec['armature']))
+                self.pbone = self.arm.pose.bones[spec['bone']]
+            else:
+                role, _, canon_name = spec['bone'].partition('.')
+                ch = next((c for c in chars if c.role == role), None)
+                if ch is None or not ch.has(canon_name):
+                    raise RuntimeError('dot %s: no bone %r (use <role>.<canonical bone>, or armature + bone)' % (self.name, spec['bone']))
+                self.char, self.canon, self.arm, self.pbone = ch, canon_name, ch.arm, ch.bone(canon_name)
+        else:
+            raise RuntimeError('dot %s: needs "bone" or "object"' % self.name)
+        self.offset = Vector(spec.get('offset') or spec.get('point') or (0, 0, 0))
+
+    def region_world(self):
+        return evaluated_coords(self.obj)[self.verts]
+
+    def pos(self):
+        if self.obj is not None:
+            if self.verts is not None:
+                return Vector(self.region_world().mean(axis=0).tolist())
+            return self.obj.matrix_world @ self.offset
+        return self.arm.matrix_world @ self.pbone.matrix @ self.offset
+
+    def nearest_to(self, S, trees):
+        """Region dot, at: nearest: the region vertex with the smallest gap to `trees` (or None for other dots)."""
+        if self.verts is None or self.at != 'nearest':
+            return None
+        best = None
+        for p in self.region_world():
+            p = Vector(p.tolist())
+            if trees == 'floor':
+                g = (p.z - S.floor_z) * 1000.0
+                hit = (g, 'floor', Vector((p.x, p.y, S.floor_z)), p)
+            else:
+                h = nearest(trees, p)
+                if h is None:
+                    continue
+                hit = (signed(h, p, S.sign_range) * 1000.0, h[2], h[0], p)
+            if best is None or hit[0] < best[0]:
+                best = hit
+        return best
+
+    def own_tree(self):
+        if self.obj is not None and self.obj.type == 'MESH':
+            co = evaluated_coords(self.obj)
+            return [('own', BVHTree.FromPolygons(co.tolist(), [tuple(p.vertices) for p in self.obj.data.polygons]))]
+        if self.char is not None:
+            return self.char.region_trees({self.canon})
+        return []
+
+
 class Scene:
     """All surfaces at the current frame and the gap rule."""
 
-    def __init__(self, chars, props, floor_z, sign_range):
+    def __init__(self, chars, props, floor_z, sign_range, custom=()):
         self.chars = {c.role: c for c in chars}
         self.props = props
         self.floor_z = floor_z
         self.sign_range = sign_range
+        self.custom = {d.name: d for d in custom}
         self.skin = {}
         self.excl = {}
         self.prop_list = []
@@ -390,6 +510,8 @@ class Scene:
         for role, c in self.chars.items():
             for d, p in c.dots().items():
                 self.dot_pos['%s.%s' % (role, d)] = p
+        for name, d in self.custom.items():
+            self.dot_pos[name] = d.pos()
 
     def calibrate(self):
         for role, c in self.chars.items():
@@ -402,32 +524,56 @@ class Scene:
                 else:
                     hit = nearest(c.region_trees(part), p)
                     self.skin[full] = hit[3] * 1000.0 if hit else 0.0
+        for name, d in self.custom.items():
+            if d.char is not None:
+                self.excl[name] = d.char.chain({d.canon})
+            r = d.spec.get('radius', 0)
+            if r == 'measure':
+                hit = nearest(d.own_tree(), d.pos())
+                if hit is None:
+                    raise RuntimeError('dot %s: radius "measure" needs a mesh of its own' % name)
+                self.skin[name] = hit[3] * 1000.0
+            else:
+                self.skin[name] = float(r)
+
+    def role_of(self, full):
+        d = self.custom.get(full)
+        if d is not None:
+            return d.char.role if d.char is not None else None
+        return full.split('.')[0]
 
     def groups(self, full):
         """Surface groups a dot is measured against: name -> trees (or 'floor')."""
-        role = full.split('.')[0]
+        role = self.role_of(full)
+        d = self.custom.get(full)
+        own_prop = 'prop:' + d.obj.name if d is not None and d.obj is not None else None
         out = {}
         for r, c in self.chars.items():
             out[r] = c.region_trees(exclude=self.excl.get(full, ()) if r == role else ())
         for label, tree in self.prop_list:
-            out[label] = [(label, tree)]
+            if label != own_prop:
+                out[label] = [(label, tree)]
         if self.floor_z is not None:
             out['floor'] = 'floor'
         return out
 
     def gap(self, full, trees):
-        """(gap mm, surface label, nearest point) of one dot against one surface group, or None."""
+        """(gap mm, surface label, nearest surface point, dot point) of one dot against one surface group, or None."""
         p = self.dot_pos[full]
+        d = self.custom.get(full)
+        if d is not None and d.at == 'nearest' and d.verts is not None:
+            hit = d.nearest_to(self, trees)
+            return None if hit is None else (hit[0] - self.skin[full], hit[1], hit[2], hit[3])
         if trees == 'floor':
-            return (p.z - self.floor_z) * 1000.0 - self.skin[full], 'floor', Vector((p.x, p.y, self.floor_z))
+            return (p.z - self.floor_z) * 1000.0 - self.skin[full], 'floor', Vector((p.x, p.y, self.floor_z)), p
         hit = nearest(trees, p)
         if hit is None:
             return None
-        return signed(hit, p, self.sign_range) * 1000.0 - self.skin[full], hit[2], hit[0]
+        return signed(hit, p, self.sign_range) * 1000.0 - self.skin[full], hit[2], hit[0], p
 
     def surface(self, b, full):
         """Trees for a surface spec, seen from dot `full`."""
-        role = full.split('.')[0]
+        role = self.role_of(full)
         if b == 'floor':
             if self.floor_z is None:
                 raise RuntimeError('surface floor: the config has floorZ null')
@@ -439,6 +585,8 @@ class Scene:
             return hit
         who, _, bone = b.partition('.')
         if who == 'self':
+            if role is None:
+                raise RuntimeError('surface %r: dot %s is not on a character' % (b, full))
             who = role
         if who not in self.chars:
             raise RuntimeError('surface %r: no character %r' % (b, who))
@@ -454,16 +602,20 @@ def measure(cfg, chars=None, props=None):
         chars, props = load_scene(cfg)
     sc = bpy.context.scene
     contacts = cfg.get('contacts') or []
+    checks = cfg.get('checks') or []
     frames = frame_list(cfg.get('frames', 'all'), chars)
-    for c in contacts:
+    for c in contacts + checks:
         c['frames'] = [int(f) for f in (c.get('frames') or frames)]
-    frames = sorted(set(frames) | {f for c in contacts for f in c['frames']})
+    frames = sorted(set(frames) | {f for c in contacts + checks for f in c['frames']})
     if not frames:
         raise RuntimeError('no frames to measure')
     calib = int(cfg.get('calibFrame', frames[0]))
     floor = cfg.get('floorZ', 0.0)
-    S = Scene(chars, props or [], None if floor is None else float(floor), float(cfg.get('signRangeM', SIGN_RANGE)))
     sc.frame_set(calib)
+    custom = [CustomDot(d, chars) for d in cfg.get('dots') or []]
+    S = Scene(chars, props or [], None if floor is None else float(floor), float(cfg.get('signRangeM', SIGN_RANGE)), custom)
+    per_check = {c['id']: {} for c in checks}
+    hold_ref = {}
     for c in chars:
         c.build_regions(); c.update()
     S.calibrate()
@@ -486,23 +638,28 @@ def measure(cfg, chars=None, props=None):
             if joints is not None:
                 joints[c.role][str(f)] = {j: v3(c.head(j)) for j in cfg['joints'] if c.has(j)}
         for full in S.dot_pos:
+            if full in S.custom and not S.custom[full].penetration:
+                continue
             for gname, trees in S.groups(full).items():
                 g = S.gap(full, trees)
                 if g is None:
                     continue
-                mm, label, q = g
+                mm, label, q, p = g
                 key = (full, gname)
-                if mm < 0 and (key not in pen or mm < pen[key]['mm']):
+                if mm < -PEN_EPS_MM and (key not in pen or mm < pen[key]['mm']):
                     pen[key] = {'dot': full, 'surface': label, 'group': gname, 'mm': round(mm, 2), 'frame': f,
-                                'p': v3(S.dot_pos[full]), 'q': v3(q)}
+                                'p': v3(p), 'q': v3(q)}
                 if mm <= observe and (key not in seen or mm < seen[key]['mm']):
                     seen[key] = {'dot': full, 'surface': label, 'mm': round(mm, 2), 'frame': f}
         for c in contacts:
             if f not in c['frames']:
                 continue
-            role, _, grp = c['a'].partition('.')
-            local = {d.partition('.')[2] for d in S.dot_pos if d.startswith(role + '.')}
-            members = ['%s.%s' % (role, d) for d in group_members(local, grp)]
+            if c['a'] in S.custom:
+                members = [c['a']]
+            else:
+                role, _, grp = c['a'].partition('.')
+                local = {d.partition('.')[2] for d in S.dot_pos if d.startswith(role + '.')}
+                members = ['%s.%s' % (role, d) for d in group_members(local, grp)]
             if not members:
                 raise RuntimeError('contact %s: no dots for %r' % (c['id'], c['a']))
             best = None
@@ -511,10 +668,13 @@ def measure(cfg, chars=None, props=None):
                 for trees in surfaces:
                     g = S.gap(full, trees)
                     if g and (best is None or g[0] < best[0]):
-                        best = (g[0], full, g[1], g[2])
+                        best = (g[0], full, g[1], g[2], g[3])
             if best:
                 per_contact[c['id']][str(f)] = {'mm': round(best[0], 3), 'dot': best[1], 'surface': best[2],
-                                               'p': v3(S.dot_pos[best[1]]), 'q': v3(best[3])}
+                                               'p': v3(best[4]), 'q': v3(best[3])}
+        for ch in checks:
+            if f in ch['frames']:
+                per_check[ch['id']][str(f)] = eval_check(ch, S, hold_ref)
         if snap and int(snap['frame']) == f:
             write_snapshot(S, snap)
         print('DOTS_FRAME', f, round(time.time() - began, 1), flush=True)
@@ -525,6 +685,11 @@ def measure(cfg, chars=None, props=None):
         if rows:
             want.add(int(max(rows, key=lambda k: rows[k]['mm'])))             # the most-off frame
             want.add(int(min(rows, key=lambda k: rows[k]['mm'])))             # the deepest frame
+    for c in checks:
+        rows = per_check[c['id']]
+        if rows:
+            want.add(int(max(rows, key=lambda k: rows[k]['v'])))
+            want.add(int(min(rows, key=lambda k: rows[k]['v'])))
     for f in sorted(want):
         sc.frame_set(f); S.frame()
         closeup_at[str(f)] = {k: v3(p) for k, p in S.dot_pos.items()}
@@ -536,6 +701,8 @@ def measure(cfg, chars=None, props=None):
               'warnings': warnings, 'roots': roots,
               'skinMm': {k: round(v, 3) for k, v in S.skin.items()},
               'contacts': [dict(c, gaps=per_contact[c['id']]) for c in contacts],
+              'checks': [dict(c, values=per_check[c['id']], unit=UNITS[c['kind']]) for c in checks],
+              'dots': {n: {'radiusMm': round(S.skin[n], 3)} for n in S.custom},
               'penetrations': pens, 'observed': sorted(seen.values(), key=lambda r: r['mm']),
               'dotsAt': closeup_at, 'props': [o.name for o in props or []],
               'seconds': round(time.time() - began, 1)}
@@ -580,7 +747,7 @@ def write_snapshot(S, snap):
             surf = _near(*every[who], {bone} if bone else None, S.excl[full] if (who == role and not bone) else (), p, crop)
         used[role] |= set(own.tolist()); used[who] |= set(surf.tolist())
         picks.append((role, own, who, surf))
-        mm, label, _ = S.gap(full, trees)
+        mm, label, _, _ = S.gap(full, trees)
         arrays['dot%d' % i] = np.array(p, dtype=np.float64)
         meta['dots'].append({'name': full, 'snapped': is_snapped(dot), 'toolSkinMm': round(S.skin[full], 3),
                              'toolGapMm': round(mm, 3), 'toolSurface': label, 'ownRole': role, 'surfRole': who})
