@@ -118,6 +118,10 @@ def run_blender(exe, script, args, timeout, done_tag, echo=print, show=('DOTS_WA
         process.wait(timeout=max(1, timeout - (time.time() - began)))
     except subprocess.TimeoutExpired:
         process.kill()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
         raise Skipped('Blender exceeded %d s and was stopped' % timeout)
     if process.returncode != 0 or not any(l.startswith(done_tag) for l in lines):
         errors = [l for l in lines if 'Error' in l]

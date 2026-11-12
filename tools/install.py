@@ -4,7 +4,8 @@
   python tools/install.py [--dest DIR] [--dist DIR] [--zip-only]
 
 Copies skill/contact-dots to DIR (default: the user skills folder, ~/.claude/skills/contact-dots). An existing copy is
-moved aside first to contact-dots.bak-<UTC time> beside it; the installed copy is never edited in place. Always writes
+moved aside first to skill-backups/contact-dots.bak-<UTC time> beside the skills folder (never inside it, or it would
+load as a second skill); the installed copy is never edited in place. Always writes
 dist/contact-dots.zip (one top folder contact-dots/). Prints what it replaced and the file hash list summary.
 """
 import argparse
@@ -36,12 +37,15 @@ def install(dest, echo=print):
     replaced = None
     if dest.exists():
         stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
-        replaced = dest.with_name('%s.bak-%s' % (dest.name, stamp))
+        # outside the skills folder: a copy left in it would load as a second skill
+        backups = dest.parent.parent / 'skill-backups'
+        backups.mkdir(parents=True, exist_ok=True)
+        replaced = backups / ('%s.bak-%s' % (dest.name, stamp))
         n = 1
         while replaced.exists():
             n += 1
-            replaced = dest.with_name('%s.bak-%s-%d' % (dest.name, stamp, n))
-        dest.rename(replaced)
+            replaced = backups / ('%s.bak-%s-%d' % (dest.name, stamp, n))
+        shutil.move(str(dest), str(replaced))
         echo('install: moved the existing copy aside to %s' % replaced)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(SKILL, dest, ignore=SKIP)

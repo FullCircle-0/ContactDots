@@ -22,6 +22,7 @@ def test_install_equal_and_backup(tmp_path):
     assert backup and (backup / 'stale.txt').is_file() and not (dest / 'stale.txt').exists()
     assert install.hash_list(dest) == install.hash_list(SKILL)
     assert any('moved the existing copy aside' in l for l in lines)
+    assert sorted(p.name for p in (tmp_path / 'skills').iterdir()) == ['contact-dots']   # no backup among the skills
 
 
 def test_zip_passes_selftest(tmp_path):
