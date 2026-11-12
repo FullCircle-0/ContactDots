@@ -1,0 +1,237 @@
+"""Contact dots close-up sheet. Runs INSIDE Blender (the host script dots.py launches it):
+    blender -b --factory-startup --python-exit-code 1 -P dots_sheet_blender.py -- <dots-sheet-job.json>
+
+The job (written by dots.py from a judged dots.json): out (the sheet png), config (the measured config: the scene is
+rebuilt from its files, or from its 'builtin' selftest entry), dotsAt (frame -> dot -> position), roles (character
+order for the dot colours) and tiles [{name, frame, p, q, ok, caption, da, db}] (metres, unit directions).
+
+Per tile: the bodies see-through, every dot of that frame coloured per character (custom dots on objects in one
+colour), the measured dot and its surface point larger, the pair line (yellow pass, magenta fail), for align and range
+the two directions as arrows; an orthographic close-up looks across the pair (or square onto the two arrows) with the
+caption at the bottom. Tiles go to dots-sheet-tiles/<name>.png and are composed into the sheet. Reads only; writes
+only beside the sheet. Prints DOTS_SHEET_DONE <json>.
+"""
+import json
+import math
+import sys
+import time
+from pathlib import Path
+
+import bpy
+import bmesh
+import numpy as np
+from mathutils import Vector
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import dots_blender  # noqa: E402
+
+TILE = 480
+COLS = 3
+GAP_PX = 6
+ROLE_COLOURS = [(1.0, 0.55, 0.1, 1), (0.1, 0.8, 0.75, 1), (0.45, 0.65, 1.0, 1), (0.6, 0.9, 0.3, 1)]
+COLOURS = {'pass': (1, 1, 0, 1), 'fail': (1, 0, 1, 1), 'object': (0.65, 0.35, 0.95, 1), 'surface': (0.95, 0.95, 0.95, 1),
+           'arrowA': (0.45, 0.65, 1.0, 1), 'text': (1, 1, 1, 1)}      # never pure R/G/B
+SKIN = [(0.6, 0.62, 0.66, 1), (0.8, 0.78, 0.75, 1)]
+UP = Vector((0, 0, 1))
+
+
+def emission(name, rgba, strength=2.0):
+    m = bpy.data.materials.get(name)
+    if m:
+        return m
+    m = bpy.data.materials.new(name); m.use_nodes = True; nt = m.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    e = nt.nodes.new('ShaderNodeEmission'); e.inputs[0].default_value = rgba; e.inputs[1].default_value = strength
+    o = nt.nodes.new('ShaderNodeOutputMaterial'); nt.links.new(e.outputs[0], o.inputs[0])
+    return m
+
+
+def see_through(name, rgba, alpha=0.3):
+    m = bpy.data.materials.new(name); m.use_nodes = True
+    bsdf = m.node_tree.nodes['Principled BSDF']
+    bsdf.inputs['Base Color'].default_value = rgba; bsdf.inputs['Alpha'].default_value = alpha
+    for attr, value in (('surface_render_method', 'BLENDED'), ('blend_method', 'BLEND'), ('use_backface_culling', False)):
+        if hasattr(m, attr):
+            try:
+                setattr(m, attr, value)
+            except (TypeError, ValueError):
+                pass
+    return m
+
+
+def build_scene(cfg):
+    """Rebuild the measured scene (read only). Every mesh becomes see-through."""
+    if cfg.get('builtin'):
+        dots_blender.build_builtin(cfg['builtin'])
+    else:
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        for t in cfg.get('characters') or []:
+            dots_blender.load_file(t['file'])
+        for p in cfg.get('props') or []:
+            dots_blender.load_file(p['file'] if isinstance(p, dict) else p)
+    for i, o in enumerate(o for o in bpy.data.objects if o.type == 'MESH'):
+        mat = see_through('Skin_%d' % i, SKIN[i % 2])
+        o.data.materials.clear(); o.data.materials.append(mat)
+        o.hide_render = False
+
+
+class Marks:
+    """The dots, lines and arrows of one tile (removed before the next)."""
+
+    def __init__(self, scene):
+        self.col = bpy.data.collections.new('ContactDots'); scene.collection.children.link(self.col)
+
+    def clear(self):
+        for o in list(self.col.objects):
+            bpy.data.objects.remove(o)
+
+    def _obj(self, name, build, mat):
+        me = bpy.data.meshes.new(name); bm = bmesh.new(); build(bm); bm.to_mesh(me); bm.free()
+        me.materials.append(mat); o = bpy.data.objects.new(name, me); self.col.objects.link(o)
+        return o
+
+    def sphere(self, p, r, mat):
+        o = self._obj('dot', lambda bm: bmesh.ops.create_uvsphere(bm, u_segments=16, v_segments=10, radius=r), mat)
+        o.location = p
+
+    def rod(self, p, q, r, mat, r2=None, name='line'):
+        v = q - p
+        if v.length < 1e-5:
+            return
+        o = self._obj(name, lambda bm: bmesh.ops.create_cone(bm, cap_ends=True, segments=10, radius1=r,
+                                                               radius2=r if r2 is None else r2, depth=v.length), mat)
+        o.location = p + v / 2; o.rotation_euler = v.to_track_quat('Z', 'Y').to_euler()
+
+    def arrow(self, p, d, length, r, mat):
+        tip = p + d * length; neck = p + d * (length * 0.78)
+        self.rod(p, neck, r, mat, name='arrow'); self.rod(neck, tip, r * 3.2, mat, r2=0.0, name='head')
+
+
+def camera(scene):
+    data = bpy.data.cameras.new('SheetCam'); data.type = 'ORTHO'; data.clip_start = 0.001; data.clip_end = 100
+    cam = bpy.data.objects.new('SheetCam', data); scene.collection.objects.link(cam); scene.camera = cam
+    curve = bpy.data.curves.new('Caption', type='FONT'); curve.align_x = 'LEFT'; curve.align_y = 'BOTTOM'
+    text = bpy.data.objects.new('Caption', curve); scene.collection.objects.link(text)
+    text.parent = cam; curve.materials.append(emission('Caption', COLOURS['text'], 1.0))
+    plate = bpy.data.meshes.new('Plate')
+    bm = bmesh.new(); bmesh.ops.create_grid(bm, x_segments=1, y_segments=1, size=0.5); bm.to_mesh(plate); bm.free()
+    plate.materials.append(emission('Plate', (0.03, 0.03, 0.04, 1), 1.0))
+    back = bpy.data.objects.new('Plate', plate); scene.collection.objects.link(back); back.parent = cam
+    return cam, text, back
+
+
+def frame_tile(cam, text, back, tile, scale):
+    """Point the camera across the pair (or square onto the arrows); caption along the bottom edge."""
+    p, q = Vector(tile['p']), Vector(tile['q'])
+    gap = q - p
+    look = None
+    if 'da' in tile and 'db' in tile:
+        n = Vector(tile['da']).cross(Vector(tile['db']))
+        if n.length > 1e-3:
+            look = -n.normalized() if n.dot(UP) > 0 else n.normalized()        # the arrows' plane, seen from above-ish
+    if look is None:
+        side = gap.cross(UP) if gap.length > 1e-4 else Vector((0, 0, 0))
+        if side.length < 1e-6:
+            side = Vector((1, -1, 0))
+        side.normalize()
+        look = (side * math.cos(math.radians(15)) - UP * math.sin(math.radians(15))).normalized()
+    centre = (p + q) / 2
+    cam.data.ortho_scale = scale
+    cam.location = centre - look * 3.0
+    cam.rotation_euler = look.to_track_quat('-Z', 'Y').to_euler()
+    lines = tile['caption'].split('\n')
+    size = scale * 0.034
+    text.data.body = tile['caption']; text.data.size = size
+    text.location = (-scale * 0.48, -scale * 0.5 + size * 0.5 + size * 1.2 * (len(lines) - 1), -0.01)
+    h = size * 1.25 * len(lines) + size * 0.6
+    back.scale = (scale, h, 1); back.location = (0, -scale * 0.5 + h / 2, -0.012)
+
+
+def tile_scale(tile, cfg):
+    p, q = Vector(tile['p']), Vector(tile['q'])
+    span = (p - q).length
+    if 'da' in tile:
+        return max(0.25, span * 2.5)
+    return min(1.5, max(0.12, span * 3.0))
+
+
+def compose(paths, out):
+    imgs = []
+    for path in paths:
+        im = bpy.data.images.load(str(path)); w, h = im.size
+        px = np.empty(w * h * 4, dtype=np.float32); im.pixels.foreach_get(px)
+        imgs.append(px.reshape(h, w, 4)); bpy.data.images.remove(im)
+    cols = min(COLS, len(imgs)); rows = (len(imgs) + cols - 1) // cols
+    W = cols * TILE + (cols + 1) * GAP_PX; H = rows * TILE + (rows + 1) * GAP_PX
+    sheet = np.zeros((H, W, 4), dtype=np.float32); sheet[..., :3] = 0.08; sheet[..., 3] = 1
+    for i, px in enumerate(imgs):
+        r, c = divmod(i, cols)
+        x = GAP_PX + c * (TILE + GAP_PX); y = H - (r + 1) * (TILE + GAP_PX)        # pixel rows run bottom-up
+        sheet[y:y + px.shape[0], x:x + px.shape[1]] = px
+    im = bpy.data.images.new('dots-sheet', W, H, alpha=True)
+    im.pixels.foreach_set(sheet.ravel()); im.filepath_raw = str(out); im.file_format = 'PNG'; im.save()
+    return W, H
+
+
+def main(job_path):
+    began = time.time()
+    job = json.loads(Path(job_path).read_text(encoding='utf-8'))
+    cfg, out = job['config'], Path(job['out'])
+    tiles_dir = out.parent / 'dots-sheet-tiles'; tiles_dir.mkdir(parents=True, exist_ok=True)
+    for old in tiles_dir.glob('*.png'):
+        old.unlink()
+    build_scene(cfg)
+    scene = bpy.context.scene
+    world = bpy.data.worlds.new('World'); scene.world = world; world.use_nodes = True
+    world.node_tree.nodes['Background'].inputs['Color'].default_value = (0.16, 0.17, 0.2, 1)
+    bpy.ops.object.light_add(type='SUN', rotation=(math.radians(50), 0, math.radians(30))); bpy.context.object.data.energy = 3.0
+    for engine in ('BLENDER_EEVEE', 'BLENDER_EEVEE_NEXT'):
+        try:
+            scene.render.engine = engine
+            break
+        except TypeError:
+            continue
+    scene.render.resolution_x = scene.render.resolution_y = TILE; scene.render.resolution_percentage = 100
+    scene.view_settings.view_transform = 'Standard'
+    image = scene.render.image_settings
+    if hasattr(image, 'media_type'):
+        image.media_type = 'IMAGE'
+    image.file_format = 'PNG'; image.color_mode = 'RGBA'
+    cam, text, back = camera(scene)
+    marks = Marks(scene)
+    roles = {r: i for i, r in enumerate(job.get('roles') or [])}
+    paths = []
+    for tile in job['tiles']:
+        marks.clear()
+        scene.frame_set(int(tile['frame']))
+        scale = tile_scale(tile, cfg)
+        r = scale * 0.012
+        for name, pos in (job.get('dotsAt', {}).get(str(tile['frame'])) or {}).items():
+            role = name.split('.')[0]
+            rgba = ROLE_COLOURS[roles[role] % len(ROLE_COLOURS)] if role in roles else COLOURS['object']
+            marks.sphere(Vector(pos), r, emission('Dot_%s' % (role if role in roles else 'object'), rgba))
+        verdict = emission('Verdict_' + ('pass' if tile['ok'] else 'fail'), COLOURS['pass' if tile['ok'] else 'fail'])
+        p, q = Vector(tile['p']), Vector(tile['q'])
+        if 'da' in tile and 'db' in tile:
+            length = scale * 0.32
+            marks.arrow(p, Vector(tile['da']).normalized(), length, r * 0.35, emission('ArrowA', COLOURS['arrowA']))
+            marks.arrow(q, Vector(tile['db']).normalized(), length, r * 0.35, verdict)
+            marks.sphere(p, r * 1.3, emission('ArrowA', COLOURS['arrowA'])); marks.sphere(q, r * 1.3, verdict)
+        else:
+            marks.sphere(p, r * 1.7, verdict); marks.sphere(q, r * 1.1, emission('Surface', COLOURS['surface']))
+            marks.rod(p, q, r * 0.3, verdict)
+        frame_tile(cam, text, back, tile, scale)
+        path = tiles_dir / ('%s.png' % tile['name'])
+        scene.render.filepath = str(path)
+        bpy.ops.render.render(write_still=True)
+        paths.append(path)
+        print('DOTS_SHEET_TILE', tile['name'], round(time.time() - began, 1), flush=True)
+    w, h = compose(paths, out)
+    print('DOTS_SHEET_DONE', json.dumps({'tiles': len(paths), 'size': [w, h], 'seconds': round(time.time() - began, 1)}),
+          flush=True)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[sys.argv.index('--') + 1]))

@@ -4,7 +4,7 @@ sit, stay or line up really do; it never changes a source file.
 
   python dots.py selftest [--out DIR]               synthetic scene with known answers (run first on a new machine)
   python dots.py bones <file.fbx|.blend>            the armature's bones and the proposed bone map
-  python dots.py measure <config.json>              measure, judge, write dots.json, print the summary
+  python dots.py measure <config.json>              measure, judge, write dots.json and dots-sheet.png, print the summary
   python dots.py sheet <dots.json>                  render the close-up sheet dots-sheet.png beside dots.json
 
 Options: --blender PATH (else $BLENDER, PATH, the usual install folders), --timeout S (default 600),
@@ -415,6 +415,15 @@ def cmd_measure(args, echo=print):
     lines = describe(payload, cfg.get('name') or path.stem)
     payload['summary'] = lines
     (out / 'dots.json').write_text(json.dumps(payload, indent=1), encoding='utf-8')
+    if not args.no_sheet:
+        try:
+            png, tiles = make_sheet(out / 'dots.json', exe, args.timeout, echo)
+            lines.append('  sheet %s (%d close-ups; LOOK at it)' % (png, len(tiles)) if png else
+                         '  sheet: nothing to show')
+        except Skipped as why:
+            lines.append('  sheet skipped (%s); the numbers stand' % why)
+        payload['summary'] = lines
+        (out / 'dots.json').write_text(json.dumps(payload, indent=1), encoding='utf-8')
     for line in lines:
         echo(line)
     return 0 if payload['verdict']['status'] == 'PASS' else 1
@@ -490,9 +499,95 @@ def cmd_bones(args, echo=print):
     return 0 if out[0].startswith('dots: PASS') else 1
 
 
+CLOSEUPS = 6
+
+
+def _caption(head, value, limit, ok):
+    return '%s\n%s  (limit %s)  %s' % (head, value, limit, 'PASS' if ok else 'FAIL')
+
+
+def sheet_tiles(payload):
+    """The close-ups of a judged dots.json: one per declared contact or check (at its verdict frame) and one per
+    penetration deeper than the inside limit (worst first, at most `closeups`). Each tile: name, frame, p, q (metres),
+    ok, caption, and da/db (unit directions) for align and range."""
+    v = payload['verdict']; rows = {r['id']: r for r in v['checks']}
+    tiles, used = [], set()
+
+    def add(name, frame, ok, caption, p, q, **extra):
+        base, i = re.sub(r'[^\w.-]+', '_', name)[:60] or 'tile', 1
+        while base + ('' if i == 1 else '-%d' % i) in used:
+            i += 1
+        name = base + ('' if i == 1 else '-%d' % i); used.add(name)
+        tiles.append(dict({'name': name, 'frame': int(frame), 'ok': bool(ok), 'caption': caption, 'p': p, 'q': q}, **extra))
+
+    for c in payload.get('contacts', []):
+        r = rows.get(c['id'])
+        if not r or 'frame' not in r:
+            continue
+        g = c['gaps'][str(r['frame'])]
+        add('touch-' + c['id'], r['frame'], r['ok'], _caption(
+            'touch %s  f%d  %s on %s' % (c['id'], r['frame'], g['dot'], g['surface']), 'gap %+.1f mm' % g['mm'],
+            c.get('limit', ''), r['ok']), g['p'], g['q'])
+    for c in payload.get('checks', []):
+        r = rows.get(c['id'])
+        if not r or 'frame' not in r:
+            continue
+        val = c['values'][str(r['frame'])]
+        unit = c.get('unit', 'mm')
+        extra = {k: val[k] for k in ('da', 'db') if k in val}
+        add('%s-%s' % (c['kind'], c['id']), r['frame'], r['ok'], _caption(
+            '%s %s  f%d  %s' % (c['kind'], c['id'], r['frame'], r['what']),
+            '%.1f %s' % (val['v'], 'deg' if unit.startswith('deg') else unit), c.get('limit', ''), r['ok']),
+            val['p'], val['q'], **extra)
+    inside = v['limits']['insideMm']
+    cap = int((payload.get('config') or {}).get('closeups', CLOSEUPS))
+    for pen in [x for x in payload.get('penetrations', []) if x['mm'] < -inside][:cap]:
+        add('inside-%s-f%d' % (pen['dot'], pen['frame']), pen['frame'], False, _caption(
+            'inside  f%d  %s in %s' % (pen['frame'], pen['dot'], pen['surface']), 'gap %+.1f mm' % pen['mm'],
+            'inside <= %g mm' % inside, False), pen['p'], pen['q'])
+    return tiles
+
+
+def make_sheet(dots_path, exe, timeout, echo=print):
+    """Render dots-sheet.png beside a dots.json (judging it first if the host has not). Returns (png, tiles)."""
+    dots_path = Path(dots_path).resolve()
+    try:
+        payload = json.loads(dots_path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as e:
+        raise Skipped('cannot read %s: %s' % (dots_path, e))
+    if 'config' not in payload:
+        raise Skipped('%s has no config (measure it again with this version)' % dots_path.name)
+    if 'verdict' not in payload:
+        judge(payload, limits_of(payload['config'].get('limits')))
+    tiles = sheet_tiles(payload)
+    png = dots_path.parent / 'dots-sheet.png'
+    png.unlink(missing_ok=True)
+    if not tiles:
+        return None, tiles
+    roles = sorted({d.split('.')[0] for f in payload.get('dotsAt', {}).values() for d in f
+                    if d.split('.')[0] in (payload.get('roles') or {})})
+    job = {'dots': str(dots_path), 'out': str(png), 'tiles': tiles, 'roles': roles,
+           'config': payload['config'], 'dotsAt': payload.get('dotsAt', {})}
+    job_path = dots_path.parent / 'dots-sheet-job.json'
+    job_path.write_text(json.dumps(job, indent=1), encoding='utf-8')
+    run_blender(exe, SHEETER, [job_path], timeout, 'DOTS_SHEET_DONE', echo)
+    if not png.is_file():
+        raise Skipped('the sheet script wrote no %s' % png.name)
+    return png, tiles
+
+
 def cmd_sheet(args, echo=print):
-    echo(skipped('sheet: not built yet')[0])
-    return 2
+    try:
+        exe = find_blender(args.blender)
+        png, tiles = make_sheet(args.dots_json, exe, args.timeout, echo)
+    except Skipped as why:
+        echo(skipped(str(why))[0])
+        return 2
+    if png is None:
+        echo('dots: sheet: nothing to show (no checks declared, no penetration over the limit)')
+        return 0
+    echo('dots: sheet %s (%d close-ups; LOOK at it before reporting)' % (png, len(tiles)))
+    return 0
 
 
 def main(argv=None, echo=print):
@@ -511,6 +606,7 @@ def main(argv=None, echo=print):
         if name == 'measure':
             p.add_argument('config')
             p.add_argument('--limits', choices=sorted(PRESETS))
+            p.add_argument('--no-sheet', action='store_true', help='numbers only, no dots-sheet.png')
         if name == 'sheet':
             p.add_argument('dots_json')
     args = ap.parse_args(argv)

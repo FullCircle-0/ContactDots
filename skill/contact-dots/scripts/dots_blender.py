@@ -839,6 +839,7 @@ def measure(cfg, chars=None, props=None):
               'dots': {n: {'radiusMm': round(S.skin[n], 3)} for n in S.custom},
               'penetrations': pens, 'observed': sorted(seen.values(), key=lambda r: r['mm']),
               'dotsAt': closeup_at, 'props': [o.name for o in props or []],
+              'config': json.loads(json.dumps(cfg)),           # the sheet rebuilds the scene from it
               'seconds': round(time.time() - began, 1)}
     if joints is not None:
         result['joints'] = joints
@@ -1139,7 +1140,7 @@ def want_at(ch, f):
 def rigid_selftest(out):
     table = build_rigid_scene()
     props = [o for o in bpy.data.objects if o.type == 'MESH']
-    cfg = rigid_config(out)
+    cfg = dict(rigid_config(out), builtin={'scene': 'rigid'})
     result = measure(cfg, [], props)
     ok, rows = True, []
     for ch in result['checks']:
@@ -1157,10 +1158,17 @@ def rigid_selftest(out):
     return ok, rows
 
 
-def selftest(out, rig_names=None, bone_map=None):
+def build_builtin(spec):
+    """Rebuild a selftest scene from a dots.json config's 'builtin' entry (the sheet uses it)."""
+    if spec.get('scene') == 'rigid':
+        return build_rigid_scene()
+    return build_selftest_scene(selftest_rig(spec.get('rig', 'plain')))
+
+
+def selftest(out, rig='plain', bone_map=None):
     ok_r, rows_r = rigid_selftest(Path(out) / 'rigid')
-    arm, body, cube = build_selftest_scene(rig_names)
-    cfg = selftest_config(out)
+    arm, body, cube = build_selftest_scene(selftest_rig(rig))
+    cfg = dict(selftest_config(out), builtin={'scene': 'body', 'rig': rig})
     chars = [Character('rig', [arm, body], bone_map=bone_map)]
     result = measure(cfg, chars, [cube])
     ok, rows = ok_r, list(rows_r)
@@ -1198,7 +1206,7 @@ def main(argv):
     if argv and argv[0] == '--selftest':
         out = Path(argv[1]) if len(argv) > 1 else Path(bpy.app.tempdir) / 'dots-selftest'
         rig = argv[argv.index('--rig') + 1] if '--rig' in argv else 'plain'
-        return 0 if selftest(out, selftest_rig(rig)) else 1
+        return 0 if selftest(out, rig) else 1
     if argv and argv[0] == '--make-sample':                 # the selftest scene saved as a .blend (tests, examples)
         rig = argv[argv.index('--rig') + 1] if '--rig' in argv else 'plain'
         if rig == 'rigid':
