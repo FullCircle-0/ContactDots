@@ -5,12 +5,15 @@ The job (written by dots.py from a judged dots.json): out (the sheet png), confi
 rebuilt from its files, or from its 'builtin' selftest entry), dotsAt (frame -> dot -> position), roles (character
 order for the dot colours) and tiles [{name, frame, p, q, ok, caption, da, db}] (metres, unit directions).
 
-Per tile: the bodies see-through, every dot of that frame coloured per character (custom dots on objects in one
+Per tile: every mesh in one flat colour per character or prop, every dot of that frame coloured per character (custom dots on objects in one
 colour), the measured dot and its surface point larger, the pair line (yellow pass, magenta fail; a ring round a pair too close for a line), for align and range
-the two directions as arrows; an orthographic close-up looks across the pair (or square onto the two arrows) with the
+the two directions as arrows; a translucent disc on the surface at the measured surface point (complementary colour,
+outline and normal arrow in front); XYZ triads (X red, Y green, Z light blue) on the palm, wrist, head and pelvis in
+view. Measured marks sit toward the camera so the opaque meshes never hide them. An orthographic close-up looks across the pair (or square onto the two arrows) with the
 caption at the bottom. Tiles go to dots-sheet-tiles/<name>.png and are composed into the sheet. Reads only; writes
 only beside the sheet. Prints DOTS_SHEET_DONE <json>.
 """
+import colorsys
 import json
 import math
 import sys
@@ -32,7 +35,11 @@ ROLE_COLOURS = [(1.0, 0.33, 0.1, 1), (0.1, 0.8, 0.75, 1), (0.6, 0.9, 0.3, 1), (0
 COLOURS = {'pass': (1, 1, 0, 1), 'fail': (1, 0, 1, 1), 'object': (0.65, 0.35, 0.95, 1), 'surface': (0.95, 0.95, 0.95, 1),
            'arrowA': (0.45, 0.65, 1.0, 1), 'text': (1, 1, 1, 1)}      # never pure R/G/B
 # Palette values are display (sRGB) colours; emission() converts them to linear so the Standard view shows them as written.
-SKIN = [(0.92, 0.66, 0.48, 1), (0.48, 0.58, 0.8, 1)]   # warm / cool by turns per mesh, apart from the background
+BODY = [(0.86, 0.68, 0.56, 1), (0.6, 0.66, 0.8, 1), (0.74, 0.8, 0.6, 1), (0.82, 0.66, 0.78, 1)]   # muted, per character
+PROP = [(0.5, 0.64, 0.86, 1), (0.66, 0.6, 0.5, 1), (0.6, 0.78, 0.7, 1), (0.78, 0.74, 0.5, 1)]    # per prop object
+AXES = [(1, 0.15, 0.15, 1), (0.2, 1, 0.2, 1), (0.25, 0.5, 1, 1)]   # X Y Z: the only near-pure R/G/B on the sheet
+LIFT = 0.15             # metres toward the camera for marks drawn in front (ortho: same spot on screen)
+TRIAD_MM, TRIAD_PX = 30, 40
 UP = Vector((0, 0, 1))
 
 
@@ -52,6 +59,49 @@ def emission(name, rgba, strength=1.0):
     return m
 
 
+def flat(name, rgba):
+    """Opaque unlit colour, a little darker at grazing angles so fingers stay apart."""
+    m = bpy.data.materials.new(name); m.use_nodes = True; nt = m.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    lw = nt.nodes.new('ShaderNodeLayerWeight'); lw.inputs[0].default_value = 0.5
+    mul = nt.nodes.new('ShaderNodeMath'); mul.operation = 'MULTIPLY'; mul.inputs[1].default_value = 0.45
+    sub = nt.nodes.new('ShaderNodeMath'); sub.operation = 'SUBTRACT'; sub.inputs[0].default_value = 1.0
+    e = nt.nodes.new('ShaderNodeEmission'); e.inputs[0].default_value = [to_linear(c) for c in rgba[:3]] + [1]
+    o = nt.nodes.new('ShaderNodeOutputMaterial')
+    nt.links.new(lw.outputs['Facing'], mul.inputs[0]); nt.links.new(mul.outputs[0], sub.inputs[1])
+    nt.links.new(sub.outputs[0], e.inputs[1]); nt.links.new(e.outputs[0], o.inputs[0])
+    return m
+
+
+def complement(rgba):
+    """Opposite hue, saturation capped, value kept in 0.6-0.95 (never pure R/G/B)."""
+    h, s, v = colorsys.rgb_to_hsv(*rgba[:3])
+    return colorsys.hsv_to_rgb((h + 0.5) % 1.0, min(max(s, 0.45), 0.75), min(max(v, 0.6), 0.95)) + (1,)
+
+
+def translucent(name, rgba, alpha=0.4):
+    m = bpy.data.materials.get(name)
+    if m:
+        return m
+    m = bpy.data.materials.new(name); m.use_nodes = True; nt = m.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    e = nt.nodes.new('ShaderNodeEmission'); e.inputs[0].default_value = [to_linear(c) for c in rgba[:3]] + [1]
+    t = nt.nodes.new('ShaderNodeBsdfTransparent'); mix = nt.nodes.new('ShaderNodeMixShader')
+    mix.inputs[0].default_value = alpha
+    o = nt.nodes.new('ShaderNodeOutputMaterial')
+    nt.links.new(t.outputs[0], mix.inputs[1]); nt.links.new(e.outputs[0], mix.inputs[2])
+    nt.links.new(mix.outputs[0], o.inputs[0])
+    for attr, value in (('surface_render_method', 'BLENDED'), ('blend_method', 'BLEND'), ('use_backface_culling', False)):
+        if hasattr(m, attr):
+            try:
+                setattr(m, attr, value)
+            except (TypeError, ValueError):
+                pass
+    return m
+
+
 def see_through(name, rgba, alpha=0.5):
     m = bpy.data.materials.new(name); m.use_nodes = True
     bsdf = m.node_tree.nodes['Principled BSDF']
@@ -66,19 +116,86 @@ def see_through(name, rgba, alpha=0.5):
 
 
 def build_scene(cfg):
-    """Rebuild the measured scene (read only). Every mesh becomes see-through."""
+    """Rebuild the measured scene (read only). Every mesh gets one flat colour: per character for skinned meshes,
+    per object for props. Returns (characters for the triads, {mesh object: its colour})."""
+    chars = []
     if cfg.get('builtin'):
         dots_blender.build_builtin(cfg['builtin'])
     else:
         bpy.ops.wm.read_factory_settings(use_empty=True)
         for t in cfg.get('characters') or []:
-            dots_blender.load_file(t['file'])
+            new = dots_blender.load_file(t['file'])
+            try:
+                chars.append(dots_blender.Character(t['role'], new, t.get('bodyMesh'), t.get('boneMap'), t.get('armature')))
+            except RuntimeError:
+                pass                                                   # no triads for it; the colours still work
         for p in cfg.get('props') or []:
             dots_blender.load_file(p['file'] if isinstance(p, dict) else p)
-    for i, o in enumerate(o for o in bpy.data.objects if o.type == 'MESH'):
-        mat = see_through('Skin_%d' % i, SKIN[i % 2])
-        o.data.materials.clear(); o.data.materials.append(mat)
+    arms = [o for o in bpy.data.objects if o.type == 'ARMATURE']
+    colour, props = {}, 0
+    for o in sorted((o for o in bpy.data.objects if o.type == 'MESH'), key=lambda o: o.name):
+        owner = next((i for i, a in enumerate(arms) if dots_blender.is_skinned_to(o, a)), None)
+        if owner is not None:
+            rgba = BODY[owner % len(BODY)]
+        else:
+            rgba = PROP[props % len(PROP)]; props += 1
+        colour[o] = rgba
+        o.data.materials.clear(); o.data.materials.append(flat('Flat_' + o.name, rgba))
         o.hide_render = False
+    return chars, colour
+
+
+def surface_at(q, p, colour):
+    """The mesh under the surface point q (not the one p sits on) and its normal there; None if none within 10 mm."""
+    dg = bpy.context.evaluated_depsgraph_get()
+    hits = []
+    for o in colour:
+        ev = o.evaluated_get(dg); mw = ev.matrix_world; inv = mw.inverted()
+        ok_q, loc_q, nor, _ = ev.closest_point_on_mesh(inv @ q)
+        ok_p, loc_p, _, _ = ev.closest_point_on_mesh(inv @ p)
+        if not ok_q:
+            continue
+        n = (mw.to_3x3().inverted().transposed() @ nor).normalized()
+        hits.append(((mw @ loc_q - q).length, (mw @ loc_p - p).length if ok_p else 1e9, o, n))
+    if not hits:
+        return None
+    own_p = min(hits, key=lambda h: h[1])[2] if len(hits) > 1 else None
+    best = min((h for h in hits if h[2] is not own_p), key=lambda h: h[0], default=None)
+    if best is None or best[0] > 0.01:
+        return None
+    return best[2], best[3]
+
+
+def frames_of(ch):
+    """Semantic frames (name, origin, X, Y, Z) of one character: palm and wrist per hand, head, pelvis.
+    X = the body's right (palm: toward the little finger), Y = up / out of the palm, Z = forward / toward the fingers."""
+    def at(name):
+        if name not in ch.rig_name:
+            return None
+        return ch.arm.matrix_world @ ch.bone(name).head
+    out = []
+    for side in ('Left', 'Right'):
+        h, i, m, k = (at(side + n) for n in ('Hand', 'HandIndex1', 'HandMiddle1', 'HandPinky1'))
+        if None in (h, i, m, k):
+            continue
+        z = (m - h).normalized(); x = k - i; x = (x - z * x.dot(z)).normalized()
+        y = z.cross(x) if side == 'Right' else x.cross(z)
+        out += [('%s palm' % side, (h + i + k) / 3, x, y, z), ('%s wrist' % side, h, x, y, z)]
+    for name, bone, up_to, l_name, r_name in (('head', 'Head', None, 'LeftArm', 'RightArm'),
+                                              ('pelvis', 'Hips', 'Spine', 'LeftUpLeg', 'RightUpLeg')):
+        o, l, r = at(bone), at(l_name), at(r_name)
+        if None in (o, l, r):
+            continue
+        top = at(up_to) if up_to else None
+        y = ((top if top is not None else ch.arm.matrix_world @ ch.bone(bone).tail) - o).normalized()
+        x = r - l; x = (x - y * x.dot(y)).normalized()
+        out.append((name, o, x, y, y.cross(x)))
+    return out
+
+
+def on_screen(cam, scale, v):
+    loc = cam.matrix_world.inverted() @ v
+    return abs(loc.x) < scale * 0.45 and abs(loc.y) < scale * 0.45
 
 
 class Marks:
@@ -114,6 +231,16 @@ class Marks:
         pts = [c + (a * math.cos(2 * math.pi * i / n) + b * math.sin(2 * math.pi * i / n)) * radius for i in range(n + 1)]
         for u, v in zip(pts, pts[1:]):
             self.rod(u, v, r, mat, name='ring')
+
+    def disc(self, c, normal, radius, mat):
+        o = self._obj('disc', lambda bm: bmesh.ops.create_circle(bm, cap_ends=True, segments=32, radius=radius), mat)
+        o.location = c + normal * 0.0004; o.rotation_euler = normal.to_track_quat('Z', 'Y').to_euler()
+
+    def triad(self, origin, axes, length, r, lift, dark):
+        for d, rgba in zip(axes, AXES):
+            self.rod(origin + lift * 0.9, origin + d * length + lift * 0.9, r * 1.7, dark, name='rim')   # dark outline behind
+            self.arrow(origin + lift, d, length, r, emission('Axis_%d_%d_%d' % tuple(int(c * 100) for c in rgba[:3]), rgba))
+        self.sphere(origin + lift, min(r * 1.2, length * 0.15), emission('TriadOrigin', (0.95, 0.95, 0.95, 1)))
 
     def arrow(self, p, d, length, r, mat):
         tip = p + d * length; neck = p + d * (length * 0.78)
@@ -246,7 +373,7 @@ def main(job_path):
     tiles_dir = out.parent / 'dots-sheet-tiles'; tiles_dir.mkdir(parents=True, exist_ok=True)
     for old in tiles_dir.glob('*.png'):
         old.unlink()
-    build_scene(cfg)
+    chars, colour = build_scene(cfg)
     scene = bpy.context.scene
     world = bpy.data.worlds.new('World'); scene.world = world; world.use_nodes = True
     world.node_tree.nodes['Background'].inputs['Color'].default_value = (0.035, 0.038, 0.05, 1)
@@ -279,8 +406,24 @@ def main(job_path):
             marks.sphere(Vector(pos), r * (0.3 if arrows else 0.75), emission('Dot_%s' % (role if role in roles else 'object'), rgba))
         verdict = emission('Verdict_' + ('pass' if tile['ok'] else 'fail'), COLOURS['pass' if tile['ok'] else 'fail'])
         p, q = Vector(tile['p']), Vector(tile['q'])
-        lift = -view_of(tile) * 0.15        # measured marks sit toward the camera, in front of the see-through meshes;
-        p, q = p + lift, q + lift           # the camera is ortho, so they keep their spot on screen
+        lift = -view_of(tile) * LIFT        # measured marks sit toward the camera, in front of the opaque meshes;
+        if not arrows:                      # the camera is ortho, so they keep their spot on screen
+            hit = surface_at(q, p, colour)
+            if hit:
+                obj, n = hit; tint = complement(colour[obj]); edge = emission('DiscEdge_' + obj.name, tint)
+                if n.dot(-view_of(tile)) < 0:
+                    n = -n
+                marks.disc(q, n, 0.0125, translucent('Disc_' + obj.name, tint))
+                marks.ring(q + lift * 0.8, n, 0.0125, r * 0.25, edge)
+                marks.arrow(q + lift * 0.8, n, 0.025, r * 0.35, edge)
+        arm_len = max(TRIAD_MM / 1000.0, TRIAD_PX / TILE * scale)
+        if arm_len <= 3 * TRIAD_MM / 1000.0:
+            rim = emission('Rim', (0.05, 0.05, 0.06, 1))
+            for ch in chars:
+                for _name, origin, x, y, z in frames_of(ch):
+                    if on_screen(cam, scale, origin):
+                        marks.triad(origin, (x, y, z), arm_len, r * 0.45, lift * 0.95, rim)
+        p, q = p + lift, q + lift
         if arrows:
             length = arrow_length(tile)
             pa, pb = arrow_bases(tile)
