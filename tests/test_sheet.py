@@ -1,5 +1,6 @@
 """Close-up sheet (Plan step 6, Spec B9): the host's tile list (no Blender) and the selftest sheets (Blender)."""
 import json
+import pathlib
 
 import pytest
 
@@ -78,3 +79,42 @@ def test_selftest_sheet(sheets, name, tiles):
         r, g, b = px[..., 0], px[..., 1], px[..., 2]       # the verdict colour, also seen through a see-through body
         mark = (np.minimum(r, g) - b > 90) if t['ok'] else (np.minimum(r, b) - g > 90)
         assert mark.sum() > 20, '%s: no %s mark' % (t['name'], 'yellow' if t['ok'] else 'magenta')
+
+
+# ---------------------------------------------------------------- Showcase S7 look (grab example)
+
+AXIS_RGB = [(255, 38, 38), (51, 255, 51), (64, 128, 255)]   # AXES in dots_sheet_blender (X red, Y green, Z light blue)
+BAR_DISC_RGB = (219, 181, 121)                              # complement() of PROP[0], the Bar's flat colour
+
+
+@pytest.fixture(scope='module')
+def grab(tmp_path_factory):
+    blender_or_skip()
+    src = pathlib.Path(__file__).resolve().parents[1] / 'examples' / 'grab'
+    tmp = tmp_path_factory.mktemp('grab')
+    cfg = json.loads((src / 'config.json').read_text(encoding='utf-8'))
+    for c in cfg['characters']:
+        c['file'] = str(src / c['file'])
+    cfg['out'] = str(tmp / 'out')
+    (tmp / 'config.json').write_text(json.dumps(cfg), encoding='utf-8')
+    code, lines = run(['measure', str(tmp / 'config.json')])
+    assert any('dots-sheet.png' in line for line in lines), lines
+    return tmp / 'out' / 'dots-sheet-tiles'
+
+
+def count(tiles, name, rgb, tol=12):
+    Image = pytest.importorskip('PIL.Image')
+    np = pytest.importorskip('numpy')
+    px = np.asarray(Image.open(tiles / ('%s.png' % name)).convert('RGB'), dtype=float)
+    return int((np.abs(px - np.array(rgb, dtype=float)).max(-1) < tol).sum())
+
+
+def test_grab_touch_tile_has_triads_and_disc(grab):
+    for axis, rgb in zip('XYZ', AXIS_RGB):                  # palm/wrist triad beside the finger contact
+        assert count(grab, 'touch-index-on-bar', rgb) > 300, 'no %s axis' % axis
+    assert count(grab, 'touch-index-on-bar', BAR_DISC_RGB, 8) > 300, 'no disc edge on the bar'
+
+
+def test_grab_marks_only_where_meant(grab):
+    assert count(grab, 'touch-palm-on-bar', AXIS_RGB[0]) < 20       # no triad on top of the contact itself
+    assert count(grab, 'align-palm-faces-bar', BAR_DISC_RGB, 8) < 20  # arrows, no disc

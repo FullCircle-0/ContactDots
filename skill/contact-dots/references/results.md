@@ -50,7 +50,12 @@ the sheet.
 
 ## The sheet
 One tile per check, at its verdict frame (the failing frame, else the worst), and one per
-penetration deeper than `insideMm` (deepest first, at most `closeups`). Meshes see-through, warm and cool by turns on a dark background, a ring round a near-zero gap, dots coloured per character
-(custom dots on objects in one colour), the measured dot larger, the pair line yellow (pass) or
-magenta (fail), angle checks as two arrows. Caption: id, value, limit, PASS/FAIL. Always look:
+penetration deeper than `insideMm` (deepest first, at most `closeups`). Each mesh in one flat colour per character or prop (a little darker at grazing angles) on a dark
+background, dots coloured per character (custom dots on objects in one colour), the measured dot
+larger, the pair line yellow (pass) or magenta (fail), a ring round a near-zero gap, angle checks
+as two arrows with dark rims. A translucent disc lies on the surface at the measured surface point,
+in the complement of that mesh's colour, with its outline and normal arrow (out of the surface,
+toward the dot); a tan disc on skin is faint, look for the outline. XYZ triads (X red, Y green,
+Z light blue; the only pure R/G/B on the sheet) show the palm, wrist, head and pelvis frames in close
+views, never on top of the contact. Measured marks are drawn in front of the meshes. Caption: id, value, limit, PASS/FAIL. Always look:
 it shows whether the right parts were measured.

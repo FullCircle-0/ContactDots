@@ -98,9 +98,12 @@ If they do not, the numbers are meaningless: fix the export, do not shift the nu
 
 ## LOOK at the sheet
 Numbers alone are not enough. Open `dots-sheet.png` (in the `out` folder) before reporting:
-meshes see-through, warm and cool by turns on a dark background, a ring round a near-zero gap, small dots per character, the measured pair joined by a line
-(yellow = pass, magenta = fail), arrows for angle checks, a caption per tile (id, value,
-limit, PASS/FAIL). Check that each tile shows the parts you meant (right hand, right thigh,
+each mesh in one flat colour per character or prop on a dark background, small dots per character,
+the measured pair joined by a line (yellow = pass, magenta = fail; a ring round a near-zero gap),
+a translucent disc on the touched surface (complementary colour, outline and normal arrow),
+XYZ triads (X red, Y green, Z light blue) on palm, wrist, head and pelvis in close views,
+arrows for angle checks, a caption per tile (id, value, limit, PASS/FAIL). Marks are drawn in
+front of the meshes, so a mark is never hidden. Check that each tile shows the parts you meant (right hand, right thigh,
 right frame). A pass on the wrong dot is a wrong answer.
 
 ## Report back
