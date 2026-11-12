@@ -1,5 +1,7 @@
 """Host script: judging, summary, config checks, exit codes (canned dots.json, no Blender)."""
 import json
+import sys
+import time
 
 import pytest
 
@@ -84,12 +86,28 @@ def test_skipped_no_blender(tmp_path):
     ({'out': 'o', 'characters': [{'role': 'her', 'file': 'a.fbx'}], 'contacts': [{'a': 'his.R.hand', 'b': 'floor'}]}, 'role'),
     ({'out': 'o', 'characters': [{'role': 'her', 'file': 'a.fbx'}], 'limts': 'finger'}, 'unknown keys'),
     ({'out': 'o'}, 'nothing to measure'),
+    ({'out': 'o', 'characters': [{'role': 'her', 'file': 'a.fbx'}], 'limits': {'off': 5}}, 'limits.off'),
+    ({'out': 'o', 'props': [{'name': 'x'}]}, 'wrong type'),
+    ({'out': 'o', 'characters': [{'role': 'her', 'file': 'a.fbx'}], 'contacts': [{'a': 3, 'b': 'floor'}]}, 'wrong type'),
+    ({'out': 'o', 'dots': [{'name': 'd', 'object': 'X'}],
+      'checks': [{'kind': 'seat', 'a': ['d'], 'b': 'd'}]}, 'wrong type'),
+    ({'out': 'o', 'characters': [{'role': 'her', 'file': 'a.fbx'}], 'snapshot': {'path': '../x.npz'}}, 'inside the out'),
 ])
 def test_bad_config(tmp_path, cfg, why):
     (tmp_path / 'a.fbx').write_bytes(b'x')
     path = tmp_path / 'c.json'; path.write_text(json.dumps(cfg))
     code, lines = run(['measure', str(path), '--blender', str(tmp_path / 'none.exe')])
     assert code == 2 and lines[0].startswith('dots: skipped (bad config') and why in lines[0]
+
+
+def test_timeout_on_silent_hang(monkeypatch, tmp_path):
+    real = dots.subprocess.Popen
+    monkeypatch.setattr(dots.subprocess, 'Popen',
+                        lambda cmd, **kw: real([sys.executable, '-c', 'import time; time.sleep(60)'], **kw))
+    began = time.time()
+    with pytest.raises(dots.Skipped, match='exceeded 2 s'):
+        dots.run_blender('blender', tmp_path / 's.py', [], 2, 'DOTS_DONE')
+    assert time.time() - began < 10
 
 
 def test_bad_json(tmp_path):

@@ -39,7 +39,7 @@ python scripts/dots.py sheet <dots.json>          # re-render the sheet only
 Options: `--blender PATH`, `--timeout S` (default 600), `--limits finger|limb` (measure),
 `--no-sheet` (measure, numbers only).
 
-First output line, always: `dots: PASS ...` (exit 0), `dots: FAIL ...` (exit 1) or
+The result line (after any warning or selftest rows): `dots: PASS ...` (exit 0), `dots: FAIL ...` (exit 1) or
 `dots: skipped (<reason>)` (exit 2: no Blender, timeout, Blender error or a bad config;
 the reason says which). A skipped run is not a result: fix the reason and run again.
 

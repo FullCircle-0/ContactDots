@@ -8,7 +8,7 @@ Lengths in `dots.json` are mm, angles degrees, positions metres (world), frames 
 ## Summary on stdout
 ```
 dots: FAIL limits finger (off <= 3 mm, inside <= 2 mm): checks 1/2 pass, 1 penetration(s) deeper than 2 mm | 14.2 s
-  touch palm-on-thigh her.R.palm -> him.LeftUpLeg: worst +0.8 mm f40 (her.R.palm on him.LeftUpLeg), deepest +0.8 mm f40  PASS
+  touch palm-on-thigh her.R.palm -> him.LeftUpLeg: worst +0.8 mm f40 (her.R.palm on him.LeftUpLeg), deepest +0.8 mm f40 (limit off <= 3, inside <= 2 mm)  PASS
   seat mag-seated mag-top -> well-top: worst 3.4 mm f40 (limit <= 1 mm)  FAIL
   inside her.L.index.tip in him -4.6 mm f42
   world check f40 roots (m): her (0.02, 0.31, 0.95), him (0.00, -0.28, 0.98)  <- confirm the characters stand where expected
@@ -45,7 +45,8 @@ the sheet.
 - `range` with `axis`: signed; a value below `min` on an elbow or knee is hyperextension.
 - A skin radius far off the others on the same limb (or 0 where it should not be) means poor
   skin weights or the wrong body mesh: that dot's gaps are rough.
-- `warnings` not empty: some dots do not exist; a check on them reports `not measured`.
+- `warnings` not empty: some dots do not exist (missing bones). A check that names one of them
+  stops the run with `dots: skipped (Blender failed: ...)`: drop or rename that check, run again.
 
 ## The sheet
 One tile per check, at its verdict frame (the failing frame, else the worst), and one per

@@ -721,7 +721,9 @@ def eval_check(ch, S, hold_ref):
         b, ob = direction(ch['b'], S)
         if kind == 'range' and ch.get('axis') is not None:
             c, _ = direction(ch['axis'], S)
-            ang = math.degrees(math.atan2(c.dot(b.cross(a)), b.dot(a)))
+            c = c.normalized()
+            ap, bp = a - c * c.dot(a), b - c * c.dot(b)   # flatten onto the plane square to the hinge axis
+            ang = math.degrees(math.atan2(c.dot(bp.cross(ap)), bp.dot(ap)))
         else:
             ang = _angle(a, b)
         return {'v': round(ang, 3), 'p': v3(oa), 'q': v3(ob), 'da': v3(a), 'db': v3(b)}

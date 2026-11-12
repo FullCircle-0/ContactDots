@@ -15,12 +15,14 @@ import argparse
 import glob
 import json
 import os
+import queue
 import re
 import shutil
 import string
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -90,15 +92,29 @@ def run_blender(exe, script, args, timeout, done_tag, echo=print, show=('DOTS_WA
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
     except OSError as e:
         raise Skipped('cannot start Blender: %s' % e)
+    feed = queue.Queue()
+
+    def pump():   # own thread, so a silent hang still meets the clock below
+        for raw in process.stdout:
+            feed.put(raw)
+        feed.put(None)
+    threading.Thread(target=pump, daemon=True).start()
     try:
-        for line in process.stdout:
+        while True:
+            left = timeout - (time.time() - began)
+            if left <= 0:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            try:
+                line = feed.get(timeout=min(left, 1.0))
+            except queue.Empty:
+                continue
+            if line is None:
+                break
             line = line.rstrip()
             if line.startswith(('DOTS_', 'Error', 'Traceback', 'RuntimeError')) or 'Error:' in line:
                 lines.append(line)
                 if line.startswith(show):
                     echo('  ' + line.split(' ', 1)[-1])
-            if time.time() - began > timeout:
-                raise subprocess.TimeoutExpired(cmd, timeout)
         process.wait(timeout=max(1, timeout - (time.time() - began)))
     except subprocess.TimeoutExpired:
         process.kill()
@@ -129,6 +145,8 @@ def limits_of(spec):
         out = dict(PRESETS[base], name=base if set(spec) <= {'preset'} else 'custom')
         for k, v in spec.items():
             if k != 'preset':
+                if k not in ('offMm', 'insideMm'):
+                    raise Skipped('bad config: limits.%s (use preset, offMm, insideMm)' % k)
                 if not isinstance(v, (int, float)):
                     raise Skipped('bad config: limits.%s must be a number' % k)
                 out[k] = float(v)
@@ -142,6 +160,13 @@ def _abs(base, p):
 
 def validate(cfg, base):
     """Check and resolve a config (paths relative to `base`). Returns a new dict; raises Skipped('bad config: ...')."""
+    try:
+        return _validate(cfg, base)
+    except (TypeError, KeyError, AttributeError, ValueError) as e:   # a value of the wrong type
+        raise Skipped('bad config: a value has the wrong type (%s: %s)' % (type(e).__name__, e))
+
+
+def _validate(cfg, base):
     if not isinstance(cfg, dict):
         raise Skipped('bad config: not a json object')
     unknown = set(cfg) - CONFIG_KEYS
@@ -203,7 +228,10 @@ def validate(cfg, base):
     out['contacts'], out['checks'] = contacts, checks
     out['limits'] = limits_of(cfg.get('limits'))
     if cfg.get('snapshot'):
-        out['snapshot'] = dict(cfg['snapshot'], path=_abs(base, cfg['snapshot']['path']))
+        snap = Path(_abs(Path(out['out']), cfg['snapshot']['path']))
+        if Path(out['out']) not in snap.parents:
+            raise Skipped('bad config: snapshot.path must be inside the out folder')
+        out['snapshot'] = dict(cfg['snapshot'], path=str(snap))
     return out
 
 
@@ -338,9 +366,9 @@ def judge(payload, limits):
         c.update(worstMm=gaps[key_at]['mm'], worstFrame=int(key_at), deepestMm=gaps[deep_at]['mm'],
                  deepestFrame=int(deep_at), ok=ok, limit='off <= %g mm, inside <= %g mm' % (off, inside))
         rows.append({'id': c['id'], 'kind': 'touch', 'what': '%s -> %s' % (c['a'], c['b']), 'ok': ok,
-                     'text': 'worst %+.1f mm f%d (%s on %s), deepest %+.1f mm f%d' % (
+                     'text': 'worst %+.1f mm f%d (%s on %s), deepest %+.1f mm f%d (limit off <= %g, inside <= %g mm)' % (
                          gaps[key_at]['mm'], int(key_at), gaps[key_at]['dot'], gaps[key_at]['surface'],
-                         gaps[deep_at]['mm'], int(deep_at)),
+                         gaps[deep_at]['mm'], int(deep_at), off, inside),
                      'frame': int(deep_at) if gaps[deep_at]['mm'] < -inside else int(key_at)})
     for c in payload.get('checks', []):
         rows.append(judge_check(c, limits))
