@@ -52,10 +52,11 @@ LIMBS = {'forearm': ('ForeArm', 'Hand'), 'upperarm': ('Arm', 'ForeArm'), 'thigh'
 LIMB_T = (0.25, 0.5, 0.75)
 PALM_SIGN = {'R': 1.0, 'L': -1.0}          # (index-pinky) x (middle-wrist) points out of the right palm, the back of the left
 SIGN_RANGE = 0.03
-# Ray-parity test for dots behind a face past SIGN_RANGE: six skewed rays (skewed so they do not run along mesh edges);
-# a dot is inside when most of them (4+) cross the surface an odd number of times. A closed surface gives 6, a lone open
-# sheet 3 (only the rays heading toward it cross), so an open prop does not fake a deep inside.
-PARITY_DIRS = ((1, 0.13, 0.07), (-1, -0.11, 0.05), (0.09, 1, -0.12), (-0.06, -1, 0.1), (0.08, -0.14, 1), (-0.12, 0.1, -1))
+# Ray-parity test for dots behind a face past SIGN_RANGE: three skewed rays and their exact opposites (skewed so they do
+# not run along mesh edges); a dot is inside when most of them (4+) cross the surface an odd number of times. A closed
+# surface gives 6; a lone open sheet, however large and however turned, at most 3 (of each opposite pair only the ray
+# heading toward the plane can cross it), so an open prop does not fake a deep inside.
+PARITY_DIRS = ((1, 0.13, 0.07), (-1, -0.13, -0.07), (0.09, 1, -0.12), (-0.09, -1, 0.12), (0.08, -0.14, 1), (-0.08, 0.14, -1))
 PARITY_INSIDE = 4
 OBSERVE_MM = 30.0
 SNAPPED = ('palm', 'heel', 'front', 'back')
@@ -1225,14 +1226,14 @@ def build_builtin(spec):
 
 def parity_selftest():
     """signed() past signRange on bare geometry: a dot centre 40 mm inside a closed 20 cm cube is inside (all 6 rays odd);
-    the same 40 mm behind a lone open sheet is not (under PARITY_INSIDE votes); 20 mm inside, within signRange, needs no
-    rays. Within 0.1 mm."""
+    the same 40 mm behind a lone open 4 m sheet is not (3 votes: wide enough that every upward ray crosses it); 20 mm
+    inside, within signRange, needs no rays. Within 0.1 mm."""
     import bmesh
     bm = bmesh.new()
     bmesh.ops.create_cube(bm, size=0.2)
     cube = [('cube', BVHTree.FromBMesh(bm))]
     bm.free()
-    sheet = [('sheet', bvh_from([(-0.5, -0.5, 0.0), (0.5, -0.5, 0.0), (0.5, 0.5, 0.0), (-0.5, 0.5, 0.0)], [(0, 1, 2, 3)]))]
+    sheet = [('sheet', bvh_from([(-2.0, -2.0, 0.0), (2.0, -2.0, 0.0), (2.0, 2.0, 0.0), (-2.0, 2.0, 0.0)], [(0, 1, 2, 3)]))]
     ok, rows = True, []
     for name, trees, p, want, inside in (('cube 40 mm inside', cube, Vector((0.01, -0.02, 0.06)), -40.0, True),
                                          ('open sheet 40 mm behind', sheet, Vector((0.01, -0.02, -0.04)), 40.0, False),
