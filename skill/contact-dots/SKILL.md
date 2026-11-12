@@ -102,8 +102,8 @@ each mesh in one flat colour per character or prop on a dark background, small d
 the measured pair joined by a line (yellow = pass, magenta = fail; a ring round a near-zero gap),
 a translucent disc on the touched surface (complementary colour, outline and normal arrow),
 XYZ triads (X red, Y green, Z light blue) on palm, wrist, head and pelvis in close views,
-arrows for angle checks, a caption per tile (id, value, limit, PASS/FAIL). Marks are drawn in
-front of the meshes, so a mark is never hidden. Check that each tile shows the parts you meant (right hand, right thigh,
+arrows for angle checks, a caption per tile (id, value, limit, PASS/FAIL). The measured pair,
+arrows, disc outline and triads are drawn in front of the meshes; the small dots may hide behind them. Check that each tile shows the parts you meant (right hand, right thigh,
 right frame). A pass on the wrong dot is a wrong answer.
 
 ## Report back

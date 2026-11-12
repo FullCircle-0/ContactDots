@@ -31,6 +31,7 @@ def test_tiles_one_per_check_and_deep_penetration():
     assert touch['frame'] == 2 and not touch['ok'] and 'gap +6.0 mm' in touch['caption'] and 'FAIL' in touch['caption']
     assert align['da'] == [1, 0, 0] and align['db'] == [0, 1, 0] and '30.0 deg' in align['caption']
     assert pen['q'] == [0, 0, 0.01] and 'inside <= 2 mm' in pen['caption']
+    assert touch['mm'] == 6.0 and pen['mm'] == -12.0 and 'mm' not in align        # the renderer orients the disc by it
 
 
 def test_penetration_tiles_capped():
@@ -76,15 +77,30 @@ def test_selftest_sheet(sheets, name, tiles):
     for t in job['tiles']:                                  # every tile has content: not one flat colour
         px = np.asarray(Image.open(folder / 'dots-sheet-tiles' / ('%s.png' % t['name'])).convert('RGB'), dtype=float)
         assert px.std() > 8, t['name']
-        r, g, b = px[..., 0], px[..., 1], px[..., 2]       # the verdict colour, also seen through a see-through body
+        r, g, b = px[..., 0], px[..., 1], px[..., 2]       # the verdict colour, drawn in front of the meshes
         mark = (np.minimum(r, g) - b > 90) if t['ok'] else (np.minimum(r, b) - g > 90)
         assert mark.sum() > 20, '%s: no %s mark' % (t['name'], 'yellow' if t['ok'] else 'magenta')
 
 
 # ---------------------------------------------------------------- Showcase S7 look (grab example)
 
-AXIS_RGB = [(255, 38, 38), (51, 255, 51), (64, 128, 255)]   # AXES in dots_sheet_blender (X red, Y green, Z light blue)
-BAR_DISC_RGB = (219, 181, 121)                              # complement() of PROP[0], the Bar's flat colour
+def _palette():
+    """AXES and complement(PROP[0]) read from the renderer's source (it imports bpy, so it cannot be imported here)."""
+    import ast
+    import colorsys
+    src = pathlib.Path(dots.__file__).with_name('dots_sheet_blender.py').read_text(encoding='utf-8')
+    tree = ast.parse(src); names = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id in ('AXES', 'PROP'):
+            names[node.targets[0].id] = ast.literal_eval(node.value)
+        if isinstance(node, ast.FunctionDef) and node.name == 'complement':
+            ns = {'colorsys': colorsys}; exec(compile(ast.Module([node], []), 'complement', 'exec'), ns)
+            names['complement'] = ns['complement']
+    rgb = lambda c: tuple(round(x * 255) for x in c[:3])      # display colours, written as is
+    return [rgb(a) for a in names['AXES']], rgb(names['complement'](names['PROP'][0]))
+
+
+AXIS_RGB, BAR_DISC_RGB = _palette()     # X red, Y green, Z light blue; the Bar is the first prop mesh (flat PROP[0])
 
 
 @pytest.fixture(scope='module')
@@ -98,7 +114,7 @@ def grab(tmp_path_factory):
     cfg['out'] = str(tmp / 'out')
     (tmp / 'config.json').write_text(json.dumps(cfg), encoding='utf-8')
     code, lines = run(['measure', str(tmp / 'config.json')])
-    assert any('dots-sheet.png' in line for line in lines), lines
+    assert code == 0 and any('dots-sheet.png' in line for line in lines), lines
     return tmp / 'out' / 'dots-sheet-tiles'
 
 
@@ -109,10 +125,11 @@ def count(tiles, name, rgb, tol=12):
     return int((np.abs(px - np.array(rgb, dtype=float)).max(-1) < tol).sum())
 
 
-def test_grab_touch_tile_has_triads_and_disc(grab):
+@pytest.mark.parametrize('tile', ['touch-index-on-bar'])   # (thumb: its palm triad would sit under the caption: left out)
+def test_grab_touch_tile_has_triads_and_disc(grab, tile):
     for axis, rgb in zip('XYZ', AXIS_RGB):                  # palm/wrist triad beside the finger contact
-        assert count(grab, 'touch-index-on-bar', rgb) > 300, 'no %s axis' % axis
-    assert count(grab, 'touch-index-on-bar', BAR_DISC_RGB, 8) > 300, 'no disc edge on the bar'
+        assert count(grab, tile, rgb) > 300, 'no %s axis' % axis
+    assert count(grab, tile, BAR_DISC_RGB, 8) > 300, 'no disc edge on the bar'
 
 
 def test_grab_marks_only_where_meant(grab):

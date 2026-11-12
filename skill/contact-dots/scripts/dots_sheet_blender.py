@@ -3,7 +3,7 @@
 
 The job (written by dots.py from a judged dots.json): out (the sheet png), config (the measured config: the scene is
 rebuilt from its files, or from its 'builtin' selftest entry), dotsAt (frame -> dot -> position), roles (character
-order for the dot colours) and tiles [{name, frame, p, q, ok, caption, da, db}] (metres, unit directions).
+order for the dot colours) and tiles [{name, frame, p, q, ok, caption, mm, da, db}] (metres, unit directions).
 
 Per tile: every mesh in one flat colour per character or prop, every dot of that frame coloured per character (custom dots on objects in one
 colour), the measured dot and its surface point larger, the pair line (yellow pass, magenta fail; a ring round a pair too close for a line), for align and range
@@ -33,7 +33,7 @@ COLS = 3
 GAP_PX = 6
 ROLE_COLOURS = [(1.0, 0.33, 0.1, 1), (0.1, 0.8, 0.75, 1), (0.6, 0.9, 0.3, 1), (0.9, 0.5, 0.6, 1)]   # far from yellow
 COLOURS = {'pass': (1, 1, 0, 1), 'fail': (1, 0, 1, 1), 'object': (0.65, 0.35, 0.95, 1), 'surface': (0.95, 0.95, 0.95, 1),
-           'arrowA': (0.45, 0.65, 1.0, 1), 'text': (1, 1, 1, 1)}      # never pure R/G/B
+           'arrowA': (0.6, 0.9, 1.0, 1), 'text': (1, 1, 1, 1)}      # never pure R/G/B
 # Palette values are display (sRGB) colours; emission() converts them to linear so the Standard view shows them as written.
 BODY = [(0.86, 0.68, 0.56, 1), (0.6, 0.66, 0.8, 1), (0.74, 0.8, 0.6, 1), (0.82, 0.66, 0.78, 1)]   # muted, per character
 PROP = [(0.5, 0.64, 0.86, 1), (0.66, 0.6, 0.5, 1), (0.6, 0.78, 0.7, 1), (0.78, 0.74, 0.5, 1)]    # per prop object
@@ -180,9 +180,10 @@ def frames_of(ch):
     return out
 
 
-def on_screen(cam, scale, v):
+def on_screen(cam, scale, v, strip=0.0):
+    """v inside the tile, clear of its edges and of the caption strip (height `strip`, metres) at the bottom."""
     loc = cam.matrix_world.inverted() @ v
-    return abs(loc.x) < scale * 0.45 and abs(loc.y) < scale * 0.45
+    return abs(loc.x) < scale * 0.45 and scale * 0.45 > loc.y > -scale * 0.45 + strip
 
 
 class Marks:
@@ -286,11 +287,10 @@ def view_of(tile):
         side = Vector((1, -1, 0))
     side.normalize()
     look = (side * math.cos(math.radians(15)) - UP * math.sin(math.radians(15))).normalized()
-    if 'n' in tile:                                   # a disc on the surface: look at it from 45 deg, not edge-on
-        n = Vector(tile['n'])
-        n = n - look * look.dot(n)
-        if n.length > 1e-3:
-            look = (look - n.normalized()).normalized()
+    if 'n' in tile:                                   # a disc on the surface: look at it from 45 deg, from outside
+        n = Vector(tile['n']).normalized()
+        across = look - n * look.dot(n)
+        look = (across.normalized() - n).normalized() if across.length > 1e-3 else -n
     return look
 
 
@@ -397,11 +397,13 @@ def main(job_path):
         hit = None if arrows else surface_at(q, p, colour)
         tile.pop('n', None)
         if hit:
-            n = hit[1]
-            if (p - q).length > 1e-4 and n.dot(p - q) < 0:
-                n = -n                                        # out of the surface, toward the measured dot
+            n = hit[1]                                        # the face normal: out of the surface
+            outside = tile.get('mm', 1.0) >= 0                # an inside dot sits behind the surface: keep it outward
+            if (p - q).length > 1e-4 and (n.dot(p - q) < 0) == outside:
+                n = -n                                        # only a reversed face normal gets turned round
             tile['n'] = list(n)
         scale = frame_tile(cam, text, back, tile)
+        bpy.context.view_layer.update()                       # the camera just moved: on_screen() reads its matrix
         r = scale * 0.016
         look = view_of(tile); base = look.dot((p + q) / 2 - cam.location)
 
@@ -423,7 +425,7 @@ def main(job_path):
             for ch in chars:
                 for _name, origin, x, y, z in frames_of(ch):
                     near_p = (origin - p) - look * look.dot(origin - p)
-                    if on_screen(cam, scale, origin) and near_p.length > 0.6 * arm_len:   # never on top of the contact
+                    if on_screen(cam, scale, origin, back.scale[1]) and near_p.length > 0.6 * arm_len:   # never on top of the contact
                         marks.triad(origin, (x, y, z), arm_len, r * 0.45, lift(MARK_DEPTH + 0.15), rim)
         p, q = p + lift(MARK_DEPTH), q + lift(MARK_DEPTH)
         if arrows:
